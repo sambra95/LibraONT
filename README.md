@@ -30,7 +30,7 @@ git clone https://github.com/<your-username>/LibraONT.git
 cd LibraONT
 ```
 
-Install dependencies with `uv`:
+Sync the environment with `uv`:
 
 ```bash
 uv sync
@@ -53,6 +53,12 @@ brew install minimap2 samtools
 If the app does not find a tool automatically, expand **External tools** in the sidebar, enter the binary path, and press enter. A green tick means the tool has been identified. The app reports detected tool versions in the sidebar and downloaded report.
 
 ## Run Locally
+
+Run `uv sync` before starting the app so the local environment matches the locked dependencies:
+
+```bash
+uv sync
+```
 
 ```bash
 uv run streamlit run app.py
