@@ -203,6 +203,9 @@ def _sequences_html(report: Report) -> str:
 
 
 def _tables(report: Report) -> None:
+    st.subheader("Data tables")
+    st.caption("Inspect the tabulated base counts, amino-acid frequencies, and haplotype calls "
+               "used to build the plots.")
     with st.expander("Data tables"):
         tabs = st.tabs(["Base counts", "Base freq", "AA counts", "AA freq", "Haplotypes"])
         tabs[0].dataframe(report.df_counts, use_container_width=True)
@@ -423,6 +426,9 @@ def _build_tables_zip(key: tuple, _report: Report) -> bytes:
 
 def _downloads(report: Report, figs: list[tuple[str, object]]) -> None:
     """Auto-generate (cached) the HTML report and data-table ZIP; offer both downloads."""
+    st.subheader("Downloads")
+    st.caption("Download a static HTML report for sharing, or export the underlying data tables "
+               "as CSV files in a ZIP archive.")
     stem = os.path.splitext(_fastq_download_name(report))[0]
     col_html, col_zip = st.columns(2)
 
