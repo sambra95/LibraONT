@@ -1,0 +1,466 @@
+"""Render a computed :class:`Report`: figures, summary metrics, tables, downloads."""
+
+from __future__ import annotations
+
+import io
+import base64
+import html
+import os
+import zipfile
+
+import plotly.graph_objects as go
+import streamlit as st
+
+from libraont import plots, theme
+from libraont.alignment import tool_versions
+from libraont.analysis import haplotype_gini
+from libraont.pipeline import Report
+
+
+def _build_figures(report: Report) -> list[tuple[str, object]]:
+    """Ordered (title, figure) pairs, matching the notebook's report layout."""
+    p = report.params
+    figs: list[tuple[str, object]] = [
+        ("Read lengths", plots.read_length_figure(report.length_counts)),
+    ]
+    if report.coverage is not None:
+        figs.append(("Plasmid coverage", plots.coverage_figure(report.coverage)))
+    figs.append(("Gap & match %", plots.gap_match_figure(
+        report.df_counts, ref_seq=report.target[:len(report.df_counts)],
+        shade_codons=report.valid_positions or None, frame_offset=0,
+        min_identity=p.min_identity, auto_match_threshold=p.auto_codon_match_pct)))
+
+    if report.valid_positions:
+        aa_fig = plots.aa_pies_figure(
+            report.df_aa_counts, report.valid_positions, min_frac=p.pie_min_frac)
+        if aa_fig is not None:
+            figs.append(("AA distribution", aa_fig))
+        if report.hap_df is not None:
+            figs.append(("Variant treemap",
+                         plots.haplotype_treemap_figure(report.hap_df)))
+    return figs
+
+
+def _stat_card(label: str, value: str, *, accent: str, sub: str = "") -> str:
+    """One summary statistic as a styled HTML 'card' (rendered in a flex row)."""
+    pal = theme.PALETTE
+    accent = pal["primary"]
+    label = html.escape(str(label))
+    value = html.escape(str(value))
+    sub = html.escape(str(sub))
+    sub_html = (f"<div style='font-size:0.72rem;color:{pal['muted']};margin-top:3px'>"
+                f"{sub}</div>") if sub else ""
+    return (
+        f"<div style='flex:1 1 0;min-width:130px;background:{pal['surface']};"
+        f"border:1px solid {pal['grid']};border-top:3px solid {accent};border-radius:12px;"
+        f"padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,0.05)'>"
+        f"<div style='font-size:0.72rem;font-weight:600;letter-spacing:0.04em;"
+        f"text-transform:uppercase;color:{pal['muted']}'>{label}</div>"
+        f"<div style='font-size:1.7rem;font-weight:700;line-height:1.15;margin-top:4px;"
+        f"color:{pal['primary_dark']}'>{value}</div>"
+        f"{sub_html}</div>")
+
+
+def _metric_cards_html(cards: list[dict]) -> str:
+    if not cards:
+        return ""
+
+    pal = theme.PALETTE
+    html_cards = []
+    for card in cards:
+        label = html.escape(str(card.get("label", "")))
+        value = html.escape(str(card.get("value", "")))
+        sub = html.escape(str(card.get("sub", "")))
+        accent = pal["primary"]
+        sub_html = (f"<div style='font-size:0.7rem;color:{pal['muted']};margin-top:2px'>"
+                    f"{sub}</div>") if sub else ""
+        html_cards.append(
+            f"<div style='flex:0 1 170px;background:{pal['surface']};"
+            f"border:1px solid {pal['grid']};border-top:3px solid {accent};"
+            f"border-radius:8px;padding:9px 12px'>"
+            f"<div style='font-size:0.68rem;font-weight:600;letter-spacing:0.04em;"
+            f"text-transform:uppercase;color:{pal['muted']}'>{label}</div>"
+            f"<div style='font-size:1.15rem;font-weight:700;line-height:1.2;margin-top:2px;"
+            f"color:{pal['primary_dark']}'>{value}</div>"
+            f"{sub_html}</div>")
+    return ("<div class='metric-cards' style='display:flex;gap:10px;flex-wrap:wrap;"
+            "margin:-4px 0 10px'>" + "".join(html_cards) + "</div>")
+
+
+def _figure_meta(fig: go.Figure) -> dict:
+    """Return figure metadata as a dict."""
+    return fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
+
+
+def _figure_metric_cards(fig: go.Figure) -> None:
+    """Render compact cards for metrics supplied in ``fig.layout.meta``."""
+    html_cards = _metric_cards_html(_figure_meta(fig).get("metric_cards") or [])
+    if html_cards:
+        st.markdown(html_cards, unsafe_allow_html=True)
+
+
+def _figure_description_text(fig: go.Figure) -> str:
+    """Return a short plot-specific interpretation note, when provided."""
+    meta = fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
+    return str(meta.get("description") or "")
+
+
+def _figure_description(fig: go.Figure) -> None:
+    """Render a short plot-specific interpretation note, when provided."""
+    description = _figure_description_text(fig)
+    if description:
+        st.caption(description)
+
+
+def _summary_cards(report: Report) -> list[str]:
+    """Summary card HTML shared by Streamlit rendering and HTML export."""
+    pal = theme.PALETTE
+    total = sum(report.length_counts.values())
+    kept = report.n_reads_kept
+    discarded = max(total - kept, 0)
+    kept_sub = f"{kept / total * 100:.1f}% of {total:,}" if total else ""
+    disc_sub = f"{discarded / total * 100:.1f}% of {total:,}" if total else ""
+
+    if report.hap_df is not None and not report.hap_df.empty:
+        variants, var_sub = f"{len(report.hap_df):,}", f"Gini {haplotype_gini(report.hap_df):.3f}"
+    else:
+        variants, var_sub = "-", "no codon positions"
+
+    return [
+        _stat_card("Reads kept", f"{kept:,}", accent=pal["primary"], sub=kept_sub),
+        _stat_card("Reads discarded", f"{discarded:,}", accent=pal["accent"], sub=disc_sub),
+        _stat_card("Insert length", f"{len(report.target):,} bp", accent=pal["primary"]),
+        _stat_card("Codons", f"{report.df_aa_counts.shape[0]:,}", accent=pal["primary"]),
+        _stat_card("Unique variants", variants, accent=pal["secondary"], sub=var_sub),
+    ]
+
+
+def _summary(report: Report) -> None:
+    st.markdown(
+        "<div style='display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px'>"
+        + "".join(_summary_cards(report)) + "</div>",
+        unsafe_allow_html=True)
+
+
+def _parameter_rows(report: Report) -> list[tuple[str, str]]:
+    """Readable analysis parameters for the downloaded HTML report."""
+    p = report.params
+    tools = tool_versions(p.tool_paths)
+    return [
+        ("Input FASTQ", _fastq_download_name(report)),
+        ("Insert Region", f"{p.start_pos}-{p.stop_pos} (length {len(report.target):,} bp)"),
+        ("Plasmid reference", "Yes" if p.plasmid_seq else "No"),
+        ("Read identity cutoff", f"{p.min_identity:.2f}"),
+        ("Trim padding", f"{p.pad:,} bp"),
+        ("Identified Variable Codons", ", ".join(map(str, report.valid_positions)) or "None"),
+        ("Variable Codon Detection Threshold",
+         f"< {p.auto_codon_match_pct:g}% match" if p.auto_codon_match_pct is not None else "Off"),
+        ("Min pie-slice fraction", f"{p.pie_min_frac:.2f}"),
+        ("MAFFT version", tools.get("mafft") or "-"),
+        ("minimap2 version", tools.get("minimap2") or "-"),
+        ("samtools version", tools.get("samtools") or "-"),
+    ]
+
+
+def _parameters_html(report: Report) -> str:
+    """HTML table summarising analysis parameters."""
+    rows = []
+    for label, value in _parameter_rows(report):
+        rows.append(
+            "<tr>"
+            f"<th>{html.escape(str(label))}</th>"
+            f"<td>{html.escape(str(value))}</td>"
+            "</tr>")
+    return (
+        "<section class='parameter-summary'>"
+        "<h2>Analysis parameters</h2>"
+        "<p class='caption'>Settings and inputs used to generate this report.</p>"
+        "<table class='parameter-table'><tbody>"
+        + "".join(rows)
+        + "</tbody></table></section>")
+
+
+def _sequence_block(label: str, sequence: str | None) -> str:
+    """HTML block for long nucleotide sequences."""
+    if not sequence:
+        return ""
+    return (
+        "<section class='sequence-section'>"
+        f"<h3>{html.escape(label)}</h3>"
+        f"<pre>{html.escape(sequence)}</pre>"
+        "</section>")
+
+
+def _sequences_html(report: Report) -> str:
+    """HTML section containing the analysed insert and optional plasmid sequence."""
+    return (
+        "<section class='sequence-summary'>"
+        "<h2>Sequences</h2>"
+        "<p class='caption'>Reference sequences used for this analysis.</p>"
+        + _sequence_block("Insert sequence", report.target)
+        + _sequence_block("Plasmid sequence", report.params.plasmid_seq)
+        + "</section>")
+
+
+def _tables(report: Report) -> None:
+    with st.expander("Data tables"):
+        tabs = st.tabs(["Base counts", "Base freq", "AA counts", "AA freq", "Haplotypes"])
+        tabs[0].dataframe(report.df_counts, use_container_width=True)
+        tabs[1].dataframe(report.df_freq.round(4), use_container_width=True)
+        tabs[2].dataframe(report.df_aa_counts, use_container_width=True)
+        tabs[3].dataframe(report.df_aa_freq.round(4), use_container_width=True)
+        if report.hap_df is not None and not report.hap_df.empty:
+            tabs[4].dataframe(report.hap_df[["combo_label", "count"]], use_container_width=True)
+        else:
+            tabs[4].info("No haplotypes (provide codon positions).")
+
+
+def _report_key(report: Report) -> tuple:
+    """Stable signature of the analysis that produced ``report`` (drives caching)."""
+    p = report.params
+    return (p.fastq_path, p.fastq_name, p.gene_seq, p.start_pos, p.stop_pos, p.min_identity, p.pad,
+            p.plasmid_seq, tuple(p.pie_positions), p.pie_min_frac, p.auto_codon_match_pct,
+            tuple(sorted(p.tool_paths.items())))
+
+
+def _fastq_download_name(report: Report) -> str:
+    """Original FASTQ filename for downloads, falling back to the readable path."""
+    name = report.params.fastq_name or os.path.basename(report.params.fastq_path)
+    return os.path.basename(name).replace("/", "_").replace("\\", "_") or "report"
+
+
+def _figure_png_data_uri(fig: go.Figure) -> str:
+    """Render a Plotly figure to an embedded PNG data URI."""
+    image = go.Figure(fig).update_layout(title_text="").to_image(format="png", scale=3)
+    return "data:image/png;base64," + base64.b64encode(image).decode("ascii")
+
+
+def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
+    """Standalone HTML rendering of the main results section with static plot images."""
+    pal = theme.PALETTE
+    warning = ""
+    if report.params.plasmid_seq and report.coverage is None:
+        warning = (
+            "<div class='warning'>Coverage plot skipped - minimap2 and samtools must be "
+            "available (set their paths under <em>External tools</em>).</div>")
+
+    sections = []
+    for label, fig in figs:
+        title = html.escape(str(fig.layout.title.text or label))
+        description = html.escape(_figure_description_text(fig))
+        caption = f"<p class='caption'>{description}</p>" if description else ""
+        metric_cards = _metric_cards_html(_figure_meta(fig).get("metric_cards") or [])
+        image_uri = _figure_png_data_uri(fig)
+        sections.append(
+            f"<section class='plot-section'><h2>{title}</h2>{caption}"
+            f"{metric_cards}<div class='plot'><img src='{image_uri}' alt='{title}'></div>"
+            f"</section>")
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LibraONT report</title>
+  <style>
+    body {{
+      margin: 0;
+      background: {pal['bg']};
+      color: {pal['text']};
+      font-family: Inter, Segoe UI, Helvetica, Arial, sans-serif;
+    }}
+    main {{
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 28px 28px 44px;
+    }}
+    h1 {{
+      color: {pal['primary_dark']};
+      margin: 0 0 4px;
+      font-size: 2.2rem;
+      line-height: 1.15;
+    }}
+    .subtitle {{
+      color: {pal['muted']};
+      margin: 0 0 18px;
+    }}
+    h2 {{
+      color: {pal['primary_dark']};
+      margin: 30px 0 6px;
+      font-size: 1.35rem;
+      line-height: 1.25;
+    }}
+    .caption {{
+      color: {pal['muted']};
+      margin: 0 0 12px;
+      line-height: 1.45;
+    }}
+    .summary-cards {{
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }}
+    .warning {{
+      background: #FFF7E6;
+      border: 1px solid #F1D08A;
+      border-radius: 8px;
+      color: {pal['text']};
+      padding: 10px 12px;
+      margin: 12px 0 18px;
+    }}
+    .parameter-summary {{
+      border-top: 1px solid {pal['grid']};
+      padding-top: 2px;
+      margin-bottom: 22px;
+    }}
+    .sequence-summary {{
+      border-top: 1px solid {pal['grid']};
+      padding-top: 2px;
+      margin-bottom: 22px;
+    }}
+    .sequence-section h3 {{
+      color: {pal['primary_dark']};
+      font-size: 1rem;
+      margin: 14px 0 6px;
+    }}
+    .sequence-section pre {{
+      margin: 0;
+      padding: 12px;
+      background: {pal['surface']};
+      border: 1px solid {pal['grid']};
+      border-radius: 8px;
+      color: {pal['text']};
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }}
+    .parameter-table {{
+      width: 100%;
+      border-collapse: collapse;
+      background: {pal['bg']};
+      border: 1px solid {pal['grid']};
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    .parameter-table th,
+    .parameter-table td {{
+      padding: 9px 12px;
+      border-bottom: 1px solid {pal['grid']};
+      text-align: left;
+      vertical-align: top;
+    }}
+    .parameter-table tr:last-child th,
+    .parameter-table tr:last-child td {{
+      border-bottom: 0;
+    }}
+    .parameter-table th {{
+      width: 210px;
+      background: {pal['surface']};
+      color: {pal['muted']};
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }}
+    .plot-section {{
+      border-top: 1px solid {pal['grid']};
+      padding-top: 2px;
+    }}
+    .plot {{
+      margin-top: 4px;
+    }}
+    .plot img {{
+      display: block;
+      width: 100%;
+      height: auto;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>LibraONT</h1>
+    <p class="subtitle">Nanopore mutagenesis-library analysis - orientation, alignment, base/AA composition and variant diversity.</p>
+    <div class="summary-cards">{''.join(_summary_cards(report))}</div>
+    {warning}
+    {_parameters_html(report)}
+    {_sequences_html(report)}
+    {''.join(sections)}
+  </main>
+</body>
+</html>"""
+
+
+# ``key`` (hashed) identifies the report; ``_report``/``_figs`` pass through but
+# are ignored by the cache hasher. So each artifact is built once per analysis and
+# kept in the cache ready to download.
+@st.cache_data(show_spinner="Generating HTML report…", max_entries=4)
+def _build_html(key: tuple, _report: Report,
+                _figs: list[tuple[str, object]]) -> tuple[str, bytes]:
+    return (f"ANALYSIS_{_fastq_download_name(_report)}.html",
+            _html_report(_report, _figs).encode("utf-8"))
+
+
+@st.cache_data(show_spinner="Zipping data tables…", max_entries=4)
+def _build_tables_zip(key: tuple, _report: Report) -> bytes:
+    """Bundle the tabulated datasets (one CSV per table) into a zip (cached)."""
+    tables = {
+        "base_counts.csv": _report.df_counts.to_csv(),
+        "base_frequencies.csv": _report.df_freq.round(6).to_csv(),
+        "aa_counts.csv": _report.df_aa_counts.to_csv(),
+        "aa_frequencies.csv": _report.df_aa_freq.round(6).to_csv(),
+    }
+    if _report.hap_df is not None and not _report.hap_df.empty:
+        tables["haplotypes.csv"] = _report.hap_df[["combo_label", "count"]].to_csv(index=False)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, csv in tables.items():
+            zf.writestr(name, csv)
+    return buf.getvalue()
+
+
+def _downloads(report: Report, figs: list[tuple[str, object]]) -> None:
+    """Auto-generate (cached) the HTML report and data-table ZIP; offer both downloads."""
+    stem = os.path.splitext(_fastq_download_name(report))[0]
+    col_html, col_zip = st.columns(2)
+
+    with col_html:
+        try:
+            fname, data = _build_html(_report_key(report), report, figs)
+            st.download_button("⬇ Download HTML report", data, file_name=fname,
+                               mime="text/html", type="primary", width="stretch")
+        except Exception as exc:
+            st.error(f"HTML export failed: {exc}")
+
+    with col_zip:
+        st.download_button("⬇ Download data tables (ZIP)",
+                           _build_tables_zip(_report_key(report), report),
+                           file_name=f"{stem}_tables.zip", mime="application/zip",
+                           type="primary", width="stretch")
+
+
+def render(report: Report) -> None:
+    """Top-level results renderer."""
+    _summary(report)
+
+    if report.params.plasmid_seq and report.coverage is None:
+        st.warning("Coverage plot skipped - minimap2 and samtools must be available "
+                   "(set their paths under *External tools*).")
+
+    figs = _build_figures(report)
+    for label, fig in figs:
+        # Show the figure's descriptive title as the heading above the plot; render
+        # a title-less copy so the heading is not duplicated inside the chart.
+        # (Use "" not None - a null title renders as the literal "undefined".)
+        st.subheader(fig.layout.title.text or label)
+        _figure_description(fig)
+        _figure_metric_cards(fig)
+        st.plotly_chart(
+            go.Figure(fig).update_layout(title_text=""),
+            use_container_width=True,
+        )
+
+    _tables(report)
+    _downloads(report, figs)

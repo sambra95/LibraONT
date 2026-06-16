@@ -1,0 +1,227 @@
+"""Tabulation of an MSA into base/amino-acid counts and haplotypes.
+
+All functions are pure (NumPy/pandas only) and operate on an ``msa`` mapping of
+``name -> aligned sequence`` where one entry is the reference row (``ref_name``).
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+
+import numpy as np
+import pandas as pd
+
+from .constants import AA_ORDER, BASE_CATEGORIES, GENETIC_CODE
+
+_AA_IDX = {a: i for i, a in enumerate(AA_ORDER)}
+
+
+def counts_from_msa_ref_columns(msa: dict[str, str], ref_name: str = "REF",
+                                alphabet: tuple[str, ...] = BASE_CATEGORIES,
+                                ignore_terminal_gaps: bool = True):
+    """Per-position base counts/frequencies on reference columns (REF != '-').
+
+    When ``ignore_terminal_gaps`` is True, '-' outside a read's covered span
+    (before its first / after its last non-gap base) is not counted.
+
+    Returns ``(df_counts, df_freq, ref_cols, coverage)``.
+    """
+    alphabet = list(alphabet)
+    alpha_idx = {b: i for i, b in enumerate(alphabet)}
+
+    ref = msa[ref_name]
+    aln_len = len(ref)
+    ref_cols = [i for i, ch in enumerate(ref) if ch != '-']
+    L = len(ref_cols)
+
+    counts = np.zeros((L, len(alphabet)), dtype=np.int64)
+    coverage = np.zeros(L, dtype=np.int64)
+
+    for name, row in msa.items():
+        if name == ref_name:
+            continue
+        assert len(row) == aln_len
+        r = [row[c].upper() for c in ref_cols]
+
+        if ignore_terminal_gaps:
+            left = next((i for i, ch in enumerate(r) if ch != '-'), None)
+            right = (len(r) - 1 - next((i for i, ch in enumerate(reversed(r)) if ch != '-'), 0)
+                     if any(ch != '-' for ch in r) else None)
+        else:
+            left, right = 0, L - 1
+
+        if left is None or right is None or right < left:
+            continue
+
+        for i in range(left, right + 1):
+            b = r[i]
+            if   b in "ACGT": counts[i, alpha_idx[b]] += 1
+            elif b == '-':    counts[i, alpha_idx['-']] += 1
+            elif b == 'N':    counts[i, alpha_idx['N']] += 1
+            else:             counts[i, alpha_idx['other']] += 1
+            coverage[i] += 1
+
+    df_counts = pd.DataFrame(counts, columns=alphabet, index=np.arange(1, L + 1))
+    df_counts.index.name = "position"
+    denom = df_counts.sum(axis=1).replace(0, np.nan)
+    df_freq = df_counts.div(denom, axis=0)
+    cov = pd.Series(coverage, index=df_counts.index, name="coverage")
+    return df_counts, df_freq, ref_cols, cov
+
+
+def reference_match_percent(df_counts: pd.DataFrame, ref_seq: str,
+                            gap_char: str = "-") -> np.ndarray:
+    """Per reference-column percentage of non-gap reads carrying the reference base.
+
+    Aligned to ``df_counts`` rows (1-based reference positions); gaps are excluded
+    from the denominator. This is the 'reference match %' series drawn by
+    :func:`libraont.plots.gap_match_figure`.
+    """
+    L = len(df_counts)
+    ref_seq = (ref_seq or "").upper()[:L]
+    totals = df_counts.sum(axis=1).astype(float).to_numpy()
+    gap = df_counts[gap_char].astype(float).to_numpy()
+    col_map = {c: i for i, c in enumerate(df_counts.columns)}
+    arr = df_counts.to_numpy(dtype=float)
+    match = np.array([arr[i, col_map[b]] if b in col_map else 0.0
+                      for i, b in enumerate(ref_seq)], dtype=float)
+    non_gap = (totals - gap)[:len(match)]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(non_gap > 0, 100.0 * match / non_gap, 0.0)
+
+
+def detect_variable_codons(df_counts: pd.DataFrame, ref_seq: str, min_match_pct: float,
+                           gap_char: str = "-", frame_offset: int = 0) -> list[int]:
+    """1-based codon positions containing any nucleotide whose reference-match %
+    falls below ``min_match_pct`` (frame-aligned to :func:`aa_counts_from_msa`)."""
+    match_perc = reference_match_percent(df_counts, ref_seq, gap_char)
+    codons = {(j - frame_offset) // 3 + 1
+              for j, mp in enumerate(match_perc)
+              if j >= frame_offset and mp < min_match_pct}
+    return sorted(codons)
+
+
+def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset: int = 0,
+                       weights: dict[str, int] | None = None):
+    """Amino-acid counts per codon position from reference columns (REF != '-').
+
+    - ``frame_offset`` (0/1/2): where the ORF starts relative to the first REF base.
+    - ``weights``: optional ``{name: int}`` if aligned sequences were deduplicated.
+
+    Returns ``(df_aa_counts, df_aa_freq, ref_codons)``.
+    """
+    if frame_offset not in (0, 1, 2):
+        raise ValueError("frame_offset must be 0, 1, or 2")
+
+    ref = msa[ref_name]
+    ref_cols = [i for i, ch in enumerate(ref) if ch != '-'][frame_offset:]
+    num_codons = len(ref_cols) // 3
+    ref_codons = [(ref_cols[3 * k], ref_cols[3 * k + 1], ref_cols[3 * k + 2])
+                  for k in range(num_codons)]
+
+    counts = np.zeros((num_codons, len(AA_ORDER)), dtype=np.int64)
+    for name, row in msa.items():
+        if name == ref_name:
+            continue
+        w = int(weights.get(name, 1)) if weights else 1
+        seq = row.upper()
+        for k, (c0, c1, c2) in enumerate(ref_codons):
+            b0, b1, b2 = seq[c0], seq[c1], seq[c2]
+            if '-' in (b0, b1, b2) or any(b not in "ACGT" for b in (b0, b1, b2)):
+                continue
+            aa = GENETIC_CODE.get(b0 + b1 + b2)
+            if aa is None:
+                continue
+            counts[k, _AA_IDX[aa]] += w
+
+    df_counts = pd.DataFrame(counts, columns=AA_ORDER, index=np.arange(1, num_codons + 1))
+    df_counts.index.name = "codon_position"
+    row_sums = df_counts.sum(axis=1).replace(0, np.nan)
+    return df_counts, df_counts.div(row_sums, axis=0), ref_codons
+
+
+def _aa_from_triplet(b0: str, b1: str, b2: str) -> str | None:
+    if '-' in (b0, b1, b2) or any(b not in "ACGT" for b in (b0, b1, b2)):
+        return None
+    return GENETIC_CODE.get(b0 + b1 + b2)
+
+
+def get_ref_codons(msa: dict[str, str], ref_name: str = "REF") -> list[tuple[int, int, int]]:
+    """Alignment-column triplets for each reference codon."""
+    ref = msa[ref_name]
+    ref_codons, current = [], []
+    for col, base in enumerate(ref):
+        if base != "-":
+            current.append(col)
+            if len(current) == 3:
+                ref_codons.append(tuple(current))
+                current = []
+    return ref_codons
+
+
+def haplotype_counts(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
+                     positions, ref_name: str = "REF") -> pd.DataFrame:
+    """Count unique AA combinations across the given 1-based codon positions.
+
+    A read contributes only if it has a valid AA call at *all* requested positions.
+    Returns columns ``combo_label, combo_tuple, count, is_reference, aa_hamming_distance``
+    (descending by count).
+    """
+    cols = ["combo_label", "combo_tuple", "count", "is_reference", "aa_hamming_distance"]
+    pos_ok = [p for p in positions if 1 <= p <= len(ref_codons)]
+    if not pos_ok:
+        return pd.DataFrame(columns=cols)
+
+    pos0 = [p - 1 for p in pos_ok]
+    ref_row = msa[ref_name]
+    ref_hap, ref_ok = [], True
+    for p0 in pos0:
+        c0, c1, c2 = ref_codons[p0]
+        aa = _aa_from_triplet(ref_row[c0].upper(), ref_row[c1].upper(), ref_row[c2].upper())
+        if aa is None:
+            ref_ok = False
+            break
+        ref_hap.append(aa)
+    ref_tuple = tuple(ref_hap) if ref_ok else None
+
+    ctr: Counter = Counter()
+    for name, row in msa.items():
+        if name == ref_name:
+            continue
+        hap, ok = [], True
+        for p0 in pos0:
+            c0, c1, c2 = ref_codons[p0]
+            aa = _aa_from_triplet(row[c0].upper(), row[c1].upper(), row[c2].upper())
+            if aa is None:
+                ok = False
+                break
+            hap.append(aa)
+        if ok:
+            ctr[tuple(hap)] += 1
+
+    if not ctr:
+        return pd.DataFrame(columns=cols)
+    rows = []
+    for tup, cnt in sorted(ctr.items(), key=lambda kv: kv[1], reverse=True):
+        hamming = sum(a != b for a, b in zip(tup, ref_tuple)) if ref_tuple is not None else None
+        rows.append({
+            "combo_label": " | ".join(f"{p}:{aa}" for p, aa in zip(pos_ok, tup)),
+            "combo_tuple": tup,
+            "count": cnt,
+            "is_reference": tup == ref_tuple,
+            "aa_hamming_distance": hamming,
+        })
+    return pd.DataFrame(rows)
+
+
+def haplotype_gini(hap_df: pd.DataFrame) -> float:
+    """Gini coefficient of the haplotype count distribution.
+    ~0: even; ~1: dominated by a few combos."""
+    if hap_df.empty:
+        return float("nan")
+    counts = np.sort(hap_df["count"].values)
+    lorenz_y = np.concatenate([[0], counts.cumsum() / counts.sum()])
+    lorenz_x = np.linspace(0, 1, len(lorenz_y))
+    # np.trapz was renamed to np.trapezoid in NumPy 2.0 (and removed under the old name).
+    trapezoid = getattr(np, "trapezoid", None) or np.trapz
+    return float(1 - 2 * trapezoid(lorenz_y, lorenz_x))

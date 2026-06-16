@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+*.bam
+*.bam.bai
+*.fai
+reference.fa
+*_report_A4.pdf
+.DS_Store
