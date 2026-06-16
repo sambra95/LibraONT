@@ -129,6 +129,8 @@ def _summary_cards(report: Report) -> list[str]:
     return [
         _stat_card("Reads kept", f"{kept:,}", accent=pal["primary"], sub=kept_sub),
         _stat_card("Reads discarded", f"{discarded:,}", accent=pal["accent"], sub=disc_sub),
+        _stat_card("Mean Phred", f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
+                   accent=pal["primary"], sub="kept reads"),
         _stat_card("Insert length", f"{len(report.target):,} bp", accent=pal["primary"]),
         _stat_card("Codons", f"{report.df_aa_counts.shape[0]:,}", accent=pal["primary"]),
         _stat_card("Unique variants", variants, accent=pal["secondary"], sub=var_sub),

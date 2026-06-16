@@ -153,6 +153,8 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
          "accent": theme.PALETTE["primary"]},
         {"label": "Min identity", "value": pct,
          "accent": theme.PALETTE["accent"]},
+        {"label": "Detected positions", "value": f"{len(shade_codons or []):,}",
+         "accent": theme.PALETTE["primary"]},
     ]
     if auto_match_threshold is not None:
         cards.append({"label": "Detection threshold",

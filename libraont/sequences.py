@@ -37,8 +37,8 @@ def _open_text(path: str):
     return opener(path, "rt", encoding="utf-8", errors="ignore")
 
 
-def read_fastq(path: str) -> Iterator[str]:
-    """Yield each read's sequence from a FASTQ file (supports .gz)."""
+def read_fastq_records(path: str) -> Iterator[tuple[str, str]]:
+    """Yield ``(sequence, quality)`` records from a FASTQ file (supports .gz)."""
     with _open_text(path) as fh:
         while True:
             header = fh.readline()
@@ -46,10 +46,16 @@ def read_fastq(path: str) -> Iterator[str]:
                 break
             seq = fh.readline().strip()
             fh.readline()          # '+' separator
-            qual = fh.readline()
+            qual = fh.readline().strip()
             if not qual:
                 break
-            yield seq
+            yield seq, qual
+
+
+def read_fastq(path: str) -> Iterator[str]:
+    """Yield each read's sequence from a FASTQ file (supports .gz)."""
+    for seq, _qual in read_fastq_records(path):
+        yield seq
 
 
 def read_length_counts(path: str) -> Counter:

@@ -55,6 +55,7 @@ class Report:
     ref_cols: list[int]
     ref_codons: list[tuple[int, int, int]]
     valid_positions: list[int]
+    mean_phred: Optional[float] = None
     hap_df: Optional[pd.DataFrame] = None
     coverage: Optional[CoverageResult] = None
 
@@ -64,6 +65,7 @@ class MsaResult:
     """Output of the expensive alignment stage (the part worth caching)."""
     target: str
     length_counts: Counter
+    mean_phred: Optional[float]
     msa: dict[str, str]
     n_reads_kept: int
 
@@ -91,7 +93,7 @@ def compute_msa(params: AnalysisParams, tools: Optional[dict] = None,
     length_counts = read_length_counts(params.fastq_path)
 
     step(0.15, "Orienting and trimming reads (edlib)…")
-    seqs_named = alignment.edlib_orient_and_trim(
+    seqs_named, mean_phred = alignment.edlib_orient_trim_and_quality(
         params.fastq_path, target, min_identity=params.min_identity,
         pad=params.pad)
     if len(seqs_named) <= 1:
@@ -105,7 +107,7 @@ def compute_msa(params: AnalysisParams, tools: Optional[dict] = None,
         seqs_named, mafft_bin=tools["mafft"], threads=1, op=3.5, ep=1.0,
         extra_args=["--localpair", "--maxiterate", "1000", "--quiet"],
         batch_size=DEFAULT_MSA_BATCH_SIZE)
-    return MsaResult(target=target, length_counts=length_counts, msa=msa,
+    return MsaResult(target=target, length_counts=length_counts, mean_phred=mean_phred, msa=msa,
                      n_reads_kept=len(seqs_named) - 1)
 
 
@@ -156,7 +158,7 @@ def tabulate_report(params: AnalysisParams, msa_result: MsaResult,
     step(1.0, "Done.")
     return Report(
         target=msa_result.target, params=params, n_reads_kept=msa_result.n_reads_kept,
-        length_counts=msa_result.length_counts,
+        length_counts=msa_result.length_counts, mean_phred=msa_result.mean_phred,
         df_counts=df_counts, df_freq=df_freq, df_aa_counts=df_aa_counts,
         df_aa_freq=df_aa_freq, ref_cols=ref_cols, ref_codons=ref_codons,
         valid_positions=valid_positions, hap_df=hap_df, coverage=coverage)

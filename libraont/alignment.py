@@ -24,7 +24,7 @@ from typing import Optional
 import edlib
 import numpy as np
 
-from .sequences import read_fastq, revcomp, write_fasta, collapse_whitespace
+from .sequences import read_fastq_records, revcomp, write_fasta, collapse_whitespace
 
 # Map a logical tool name to the env var that can override its path.
 _ENV_VARS = {"mafft": "MAFFT_BIN", "minimap2": "MINIMAP2_BIN", "samtools": "SAMTOOLS_BIN"}
@@ -90,17 +90,21 @@ def tool_versions(overrides: dict[str, str] | None = None) -> dict[str, str | No
 
 
 # --- Orientation + trimming -------------------------------------------------
-def edlib_orient_and_trim(fastq_path: str, target: str, min_identity: float = 0.65,
-                          pad: int = 200, drop_short: bool = True) -> list[tuple[str, str]]:
+def edlib_orient_trim_and_quality(fastq_path: str, target: str, min_identity: float = 0.65,
+                                  pad: int = 200,
+                                  drop_short: bool = True) -> tuple[list[tuple[str, str]],
+                                                                    float | None]:
     """For each read: find the best strand/placement vs ``target`` (edlib HW),
     trim to ``[start-pad : end+1+pad]`` on that strand, and keep it only if
     identity >= ``min_identity``.
 
-    Returns ``[("REF", target), ("read_#", trimmed_seq), ...]``.
+    Returns kept sequences plus the mean Phred score across kept full reads.
     """
     L = len(target)
     out: list[tuple[str, str]] = [("REF", target)]
-    for i, seq in enumerate(read_fastq(fastq_path), 1):
+    total_phred = 0
+    total_bases = 0
+    for i, (seq, qual) in enumerate(read_fastq_records(fastq_path), 1):
         r = seq.strip().upper()
         if not r:
             continue
@@ -121,7 +125,18 @@ def edlib_orient_and_trim(fastq_path: str, target: str, min_identity: float = 0.
             continue
 
         out.append((f"read_{i}", trimmed))
-    return out
+        total_phred += sum(ord(ch) - 33 for ch in qual)
+        total_bases += len(qual)
+    mean_phred = total_phred / total_bases if total_bases else None
+    return out, mean_phred
+
+
+def edlib_orient_and_trim(fastq_path: str, target: str, min_identity: float = 0.65,
+                          pad: int = 200, drop_short: bool = True) -> list[tuple[str, str]]:
+    """Return retained reference/read sequences after orientation and trimming."""
+    seqs, _mean_phred = edlib_orient_trim_and_quality(
+        fastq_path, target, min_identity=min_identity, pad=pad, drop_short=drop_short)
+    return seqs
 
 
 # --- Reference-anchored MAFFT alignment -------------------------------------
