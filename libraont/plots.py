@@ -46,18 +46,23 @@ _AA_NAMES: dict[str, str] = {
 
 
 def read_length_figure(length_counts: Counter) -> go.Figure:
-    """Bar chart of read-length frequencies."""
+    """Bar chart of read-length frequencies binned every 10 bp."""
     if not length_counts:
         return _empty("No reads found")
-    x, y = zip(*sorted(length_counts.items()))
+    bin_counts: Counter = Counter()
+    for length, count in length_counts.items():
+        bin_counts[(int(length) // 10) * 10] += count
+    x, y = zip(*sorted(bin_counts.items()))
+    labels = [f"{start}-{start + 9} bp" for start in x]
     fig = go.Figure(go.Bar(
-        x=x, y=y, marker_color=theme.PALETTE["primary"],
-        hovertemplate="Length %{x} bp<br>%{y} reads<extra></extra>",
+        x=x, y=y, customdata=labels, width=9,
+        marker_color=theme.PALETTE["primary"],
+        hovertemplate="Length %{customdata}<br>%{y} reads<extra></extra>",
     ))
     fig.update_layout(
         template=_T, title="Read length distribution",
-        xaxis_title="Read length (bp)", yaxis_title="Count", bargap=0.1,
-        meta={"description": "Shows how many reads fall at each read length. Use it to spot "
+        xaxis_title="Read length bin (bp)", yaxis_title="Count", bargap=0.05,
+        meta={"description": "Shows how many reads fall into each 10 bp length bin. Use it to spot "
                              "the dominant library size and any unexpected short or long reads."},
     )
     return fig
