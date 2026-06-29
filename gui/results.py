@@ -18,7 +18,7 @@ from libraont.pipeline import Report
 
 
 def _build_figures(report: Report) -> list[tuple[str, object]]:
-    """Ordered (title, figure) pairs, matching the notebook's report layout."""
+    """Ordered (title, figure) pairs in report layout order."""
     p = report.params
     figs: list[tuple[str, object]] = [
         ("Read lengths", plots.read_length_figure(report.length_counts)),
@@ -28,7 +28,8 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
     figs.append(("Gap & match %", plots.gap_match_figure(
         report.df_counts, ref_seq=report.target[:len(report.df_counts)],
         shade_codons=report.valid_positions or None, frame_offset=0,
-        min_identity=p.min_identity, auto_match_threshold=p.auto_codon_match_pct)))
+        min_identity=p.min_identity, auto_match_threshold=p.auto_codon_match_pct,
+        aa_counts=report.df_aa_counts)))
 
     if report.valid_positions:
         aa_fig = plots.aa_pies_figure(
@@ -41,7 +42,7 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
     return figs
 
 
-def _stat_card(label: str, value: str, *, accent: str, sub: str = "") -> str:
+def _stat_card(label: str, value: str, *, sub: str = "") -> str:
     """One summary statistic as a styled HTML 'card' (rendered in a flex row)."""
     pal = theme.PALETTE
     accent = pal["primary"]
@@ -101,8 +102,7 @@ def _figure_metric_cards(fig: go.Figure) -> None:
 
 def _figure_description_text(fig: go.Figure) -> str:
     """Return a short plot-specific interpretation note, when provided."""
-    meta = fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
-    return str(meta.get("description") or "")
+    return str(_figure_meta(fig).get("description") or "")
 
 
 def _figure_description(fig: go.Figure) -> None:
@@ -114,7 +114,6 @@ def _figure_description(fig: go.Figure) -> None:
 
 def _summary_cards(report: Report) -> list[str]:
     """Summary card HTML shared by Streamlit rendering and HTML export."""
-    pal = theme.PALETTE
     total = sum(report.length_counts.values())
     kept = report.n_reads_kept
     discarded = max(total - kept, 0)
@@ -127,13 +126,13 @@ def _summary_cards(report: Report) -> list[str]:
         variants, var_sub = "-", "no codon positions"
 
     return [
-        _stat_card("Reads kept", f"{kept:,}", accent=pal["primary"], sub=kept_sub),
-        _stat_card("Reads discarded", f"{discarded:,}", accent=pal["accent"], sub=disc_sub),
+        _stat_card("Reads kept", f"{kept:,}", sub=kept_sub),
+        _stat_card("Reads discarded", f"{discarded:,}", sub=disc_sub),
         _stat_card("Mean Phred", f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
-                   accent=pal["primary"], sub="kept reads"),
-        _stat_card("Insert length", f"{len(report.target):,} bp", accent=pal["primary"]),
-        _stat_card("Codons", f"{report.df_aa_counts.shape[0]:,}", accent=pal["primary"]),
-        _stat_card("Unique variants", variants, accent=pal["secondary"], sub=var_sub),
+                   sub="kept reads"),
+        _stat_card("Insert length", f"{len(report.target):,} bp"),
+        _stat_card("Codons", f"{report.df_aa_counts.shape[0]:,}"),
+        _stat_card("Unique variants", variants, sub=var_sub),
     ]
 
 

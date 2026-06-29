@@ -88,6 +88,10 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                                    help="Full plasmid; enables the coverage plot.")
 
         gene_len = len(clean_sequence(gene_seq)) if gene_seq else 0
+
+        st.subheader("Initial data analysis")
+        st.caption("Applied once when aligning and filtering reads. Changing any "
+                   "of these re-runs the analysis and affects every plot and table.")
         full = st.checkbox("Use full gene length", value=True,
                            help="Analyse the whole gene. Uncheck to restrict the "
                                 "analysis to a sub-region (e.g. a single domain).")
@@ -103,7 +107,6 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                                        max_value=max(gene_len, 1), value=max(gene_len, 1),
                                        help="Last base of the region of interest (inclusive).")
 
-        st.subheader("Parameters")
         min_identity = st.slider("Minimum identity", 0.0, 1.0, DEFAULT_MIN_IDENTITY, 0.01,
                                  help="Minimum alignment identity to the reference; "
                                       "reads below this are discarded. Lower it if too "
@@ -111,7 +114,11 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         pad = st.number_input("Padding (bp)", min_value=0, value=DEFAULT_PAD, step=10,
                               help="Extra bases kept on each side of the matched region "
                                    "when trimming each read. Increase to retain flanks.")
-        st.subheader("Codon pies / haplotypes")
+
+        st.subheader("Plot settings")
+        st.caption("Change how results are displayed without re-running the "
+                   "analysis. Codon selection drives the AA-distribution pies and "
+                   "variant treemap (and marks a cutoff on the alignment plot).")
         auto_detect = st.toggle(
             "Auto-detect variable codons", value=False,
             help="Use reference-match % to select codons automatically.")
@@ -129,8 +136,9 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                 help="1-based codon positions for AA pies & haplotypes.")
         pie_min_frac = st.number_input("Grouping threshold", min_value=0.0, max_value=1.0,
                                        value=DEFAULT_PIE_MIN_FRAC, step=0.01,
-                                       help="Amino acids below this frequency are folded "
-                                            "into a single 'Other' slice.")
+                                       help="AA-distribution plot only: amino acids below "
+                                            "this frequency are folded into a single "
+                                            "'Other' slice.")
 
         tool_paths = _tool_paths()
         run = st.button("Run analysis", type="primary", use_container_width=True)

@@ -1,6 +1,6 @@
 """Read orientation/trimming, reference-anchored MSA, and coverage computation.
 
-This module wraps the external tools the notebook used:
+This module wraps the external tools:
   * ``edlib`` (Python) for orient + trim,
   * ``mafft`` for the reference-anchored multiple alignment,
   * ``minimap2`` + ``samtools`` for whole-plasmid coverage.
@@ -15,11 +15,9 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import textwrap
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 import edlib
 import numpy as np
@@ -74,10 +72,6 @@ def _tool_version(name: str, path: str | None) -> str | None:
         return "Detected"
 
     first = output.splitlines()[0].strip()
-    if name == "mafft":
-        return first
-    if name == "minimap2":
-        return first
     if name == "samtools":
         return first.removeprefix("samtools ").strip() or first
     return first
@@ -131,14 +125,6 @@ def edlib_orient_trim_and_quality(fastq_path: str, target: str, min_identity: fl
     return out, mean_phred
 
 
-def edlib_orient_and_trim(fastq_path: str, target: str, min_identity: float = 0.65,
-                          pad: int = 200, drop_short: bool = True) -> list[tuple[str, str]]:
-    """Return retained reference/read sequences after orientation and trimming."""
-    seqs, _mean_phred = edlib_orient_trim_and_quality(
-        fastq_path, target, min_identity=min_identity, pad=pad, drop_short=drop_short)
-    return seqs
-
-
 # --- Reference-anchored MAFFT alignment -------------------------------------
 def _parse_fasta(text: str) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -175,9 +161,7 @@ def run_msa_mafft(seqs_named: list[tuple[str, str]], mafft_bin: str = "mafft", t
         cmd = [mafft_bin, "--thread", str(threads), "--addfragments", rfa_name,
                "--keeplength", "--anysymbol", "--op", str(op), "--ep", str(ep),
                *extra_args, backbone_fa]
-        kw = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        kw["text" if sys.version_info >= (3, 7) else "universal_newlines"] = True
-        proc = subprocess.run(cmd, **kw)
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         os.unlink(rfa_name)
         if proc.returncode != 0 or not proc.stdout.strip():
             raise RuntimeError(f"MAFFT addfragments failed.\nCMD: {' '.join(cmd)}\n"
@@ -217,7 +201,7 @@ class CoverageResult:
     fractions: np.ndarray
     mapped_reads: int
     contig: str
-    region: Optional[dict] = field(default=None)  # {'start','end','strand'} or None
+    region: dict | None = None  # {'start','end','strand'} or None
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:

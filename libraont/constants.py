@@ -14,13 +14,13 @@ GENETIC_CODE: dict[str, str] = {
     'GAT': 'D', 'GAC': 'D', 'GAA': 'E', 'GAG': 'E', 'GGT': 'G', 'GGC': 'G', 'GGA': 'G', 'GGG': 'G',
 }
 
-# Amino-acid display order (matches the notebook's column order).
+# Amino-acid display order.
 AA_ORDER: list[str] = list("ARNDCQEGHILKMFPSTWYV") + ["*"]
 
 # Per-position base categories used to tabulate the MSA.
 BASE_CATEGORIES: tuple[str, ...] = ('A', 'C', 'G', 'T', 'N', 'other', '-')
 
-# Default analysis parameters (mirror the notebook's create_report defaults).
+# Default analysis parameters.
 DEFAULT_MIN_IDENTITY: float = 0.70
 DEFAULT_PAD: int = 300
 DEFAULT_PIE_MIN_FRAC: float = 0.10

@@ -1,8 +1,8 @@
 """High-level orchestration: FASTQ + reference -> a fully-populated :class:`Report`.
 
-This mirrors the notebook's ``create_report`` but separates *computation* (here)
-from *presentation* (``libraont.plots`` / the GUI). Heavy steps report progress
-through an optional ``progress(fraction, message)`` callback.
+Separates *computation* (here) from *presentation* (``libraont.plots`` / the GUI).
+Heavy steps report progress through an optional ``progress(fraction, message)``
+callback.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ Progress = Optional[Callable[[float, str], None]]
 
 @dataclass
 class AnalysisParams:
-    """Everything needed to run one analysis (mirrors the notebook inputs)."""
+    """Everything needed to run one analysis."""
     fastq_path: str
     gene_seq: str
     start_pos: int
@@ -52,8 +52,6 @@ class Report:
     df_freq: pd.DataFrame
     df_aa_counts: pd.DataFrame
     df_aa_freq: pd.DataFrame
-    ref_cols: list[int]
-    ref_codons: list[tuple[int, int, int]]
     valid_positions: list[int]
     mean_phred: Optional[float] = None
     hap_df: Optional[pd.DataFrame] = None
@@ -104,9 +102,9 @@ def compute_msa(params: AnalysisParams, tools: Optional[dict] = None,
         raise RuntimeError("MAFFT not found. Set its path in the sidebar or install it.")
     step(0.30, f"Aligning {len(seqs_named) - 1} reads with MAFFT…")
     msa = alignment.run_msa_mafft(
-        seqs_named, mafft_bin=tools["mafft"], threads=1, op=3.5, ep=1.0,
-        extra_args=["--localpair", "--maxiterate", "1000", "--quiet"],
-        batch_size=DEFAULT_MSA_BATCH_SIZE)
+            seqs_named, mafft_bin=tools["mafft"], threads=1, op=3.5, ep=1.0,
+            extra_args=["--localpair", "--maxiterate", "1000", "--quiet"],
+            batch_size=DEFAULT_MSA_BATCH_SIZE)
     return MsaResult(target=target, length_counts=length_counts, mean_phred=mean_phred, msa=msa,
                      n_reads_kept=len(seqs_named) - 1)
 
@@ -136,11 +134,11 @@ def tabulate_report(params: AnalysisParams, msa_result: MsaResult,
     msa = msa_result.msa
 
     step(0.70, "Tabulating base counts…")
-    df_counts, df_freq, ref_cols, _cov = analysis.counts_from_msa_ref_columns(
+    df_counts, df_freq, _, _ = analysis.counts_from_msa_ref_columns(
         msa, alphabet=BASE_CATEGORIES, ignore_terminal_gaps=True)
 
     step(0.80, "Tabulating amino-acid counts…")
-    df_aa_counts, df_aa_freq, ref_codons = analysis.aa_counts_from_msa(msa, frame_offset=0)
+    df_aa_counts, df_aa_freq, _ = analysis.aa_counts_from_msa(msa, frame_offset=0)
 
     # Manually-specified codons, plus auto-detected variable codons when enabled.
     pie_positions = list(params.pie_positions)
@@ -160,14 +158,5 @@ def tabulate_report(params: AnalysisParams, msa_result: MsaResult,
         target=msa_result.target, params=params, n_reads_kept=msa_result.n_reads_kept,
         length_counts=msa_result.length_counts, mean_phred=msa_result.mean_phred,
         df_counts=df_counts, df_freq=df_freq, df_aa_counts=df_aa_counts,
-        df_aa_freq=df_aa_freq, ref_cols=ref_cols, ref_codons=ref_codons,
-        valid_positions=valid_positions, hap_df=hap_df, coverage=coverage)
-
-
-def run_analysis(params: AnalysisParams, progress: Progress = None) -> Report:
-    """Run the full pipeline and return a :class:`Report` (uncached convenience
-    wrapper; the GUI composes the cached stages itself - see ``gui.runner``)."""
-    tools = alignment.tool_status(params.tool_paths)
-    msa_result = compute_msa(params, tools=tools, progress=progress)
-    coverage = compute_coverage(params, msa_result.target, tools=tools, progress=progress)
-    return tabulate_report(params, msa_result, coverage, progress=progress)
+        df_aa_freq=df_aa_freq, valid_positions=valid_positions,
+        hap_df=hap_df, coverage=coverage)

@@ -17,6 +17,7 @@ from plotly.subplots import make_subplots
 from . import theme
 from .alignment import CoverageResult
 from .analysis import haplotype_gini, reference_match_percent
+from .constants import GENETIC_CODE
 
 _T = theme.TEMPLATE_NAME
 
@@ -70,10 +71,7 @@ def read_length_figure(length_counts: Counter) -> go.Figure:
 
 def coverage_figure(cov: CoverageResult) -> go.Figure:
     """Per-base coverage as a fraction of max depth, with optional insert highlight."""
-    cards = [
-        {"label": "Mapped reads", "value": f"{cov.mapped_reads:,}",
-         "accent": theme.PALETTE["primary"]},
-    ]
+    cards = [{"label": "Mapped reads", "value": f"{cov.mapped_reads:,}"}]
     fig = go.Figure(go.Scatter(
         x=cov.positions, y=cov.fractions, mode="lines",
         line=dict(color=theme.PALETTE["primary"], width=1.6), name="Fraction",
@@ -83,8 +81,8 @@ def coverage_figure(cov: CoverageResult) -> go.Figure:
     if cov.region:
         fig.add_vrect(x0=cov.region["start"], x1=cov.region["end"],
                       fillcolor=theme.PALETTE["accent_soft"], line_width=0, layer="below")
-        cards.append({"label": "Insert", "value": f"{cov.region['start']}-{cov.region['end']}",
-                      "accent": theme.PALETTE["accent"]})
+        cards.append({"label": "Insert",
+                      "value": f"{cov.region['start']}-{cov.region['end']}"})
     fig.update_layout(
         template=_T, title="Coverage fraction", xaxis_title="Position (bp)",
         yaxis_title="Fraction of overlapping reads",
@@ -102,10 +100,15 @@ def coverage_figure(cov: CoverageResult) -> go.Figure:
 def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "-",
                      shade_codons=None, frame_offset: int = 0,
                      min_identity: float | None = None,
-                     auto_match_threshold: float | None = None) -> go.Figure:
+                     auto_match_threshold: float | None = None,
+                     aa_counts: pd.DataFrame | None = None) -> go.Figure:
     """Per-position gap % (counts['-'] / row total) and reference-match %
     (gaps excluded from the denominator), optionally shading full codons and
-    showing the auto-detect reference-match cutoff."""
+    showing the auto-detect reference-match cutoff.
+
+    When ``aa_counts`` (per-codon amino-acid counts, 1-based codon index) is
+    given, the hover for each position also lists the 20 amino acids in two
+    columns with their relative frequency at that codon."""
     if gap_char not in df_counts.columns:
         raise ValueError(f"Gap column '{gap_char}' not in df_counts: {list(df_counts.columns)}")
     if frame_offset not in (0, 1, 2):
@@ -117,15 +120,30 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
     match_perc = reference_match_percent(df_counts, ref_seq, gap_char)
 
     x = df_counts.index.astype(int)
+    codon_heads, aa_blocks = _codon_hover_labels(ref_seq, L, frame_offset, aa_counts)
     fig = go.Figure()
+    # Invisible trace drawn first carries the codon number so, in the unified
+    # hover, it renders at the very top (just under the position header) with no
+    # colour swatch. A trailing <br> on each element leaves a blank separator line.
+    fig.add_trace(go.Scatter(x=x, y=gap_perc.values, mode="lines",
+                             line=dict(color="rgba(0,0,0,0)"), showlegend=False,
+                             customdata=codon_heads,
+                             hovertemplate="%{customdata}<br><extra></extra>"))
     fig.add_trace(go.Scatter(x=x, y=gap_perc.values, mode="lines+markers",
                              name="Gap %", line=dict(color=theme.GAP_COLOR),
                              marker=dict(size=4),
-                             hovertemplate="Pos %{x}<br>Gap %{y:.2f}%<extra></extra>"))
+                             hovertemplate="<b>Gap:</b> %{y:.2f}%<br><extra></extra>"))
     fig.add_trace(go.Scatter(x=x, y=match_perc, mode="lines+markers",
                              name="Reference match %", line=dict(color=theme.MATCH_COLOR),
                              marker=dict(size=4),
-                             hovertemplate="Pos %{x}<br>Ref match %{y:.2f}%<extra></extra>"))
+                             hovertemplate="<b>Reference match:</b> %{y:.2f}%<br><extra></extra>"))
+    if aa_blocks is not None:
+        # AA table on an invisible trace drawn last so it renders as its own
+        # block underneath both coloured line entries (no swatch beside it).
+        fig.add_trace(go.Scatter(x=x, y=match_perc, mode="lines",
+                                 line=dict(color="rgba(0,0,0,0)"), showlegend=False,
+                                 customdata=aa_blocks,
+                                 hovertemplate="%{customdata}<extra></extra>"))
 
     if auto_match_threshold is not None:
         fig.add_trace(go.Scatter(
@@ -134,7 +152,7 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
             mode="lines",
             name="Detection threshold",
             line=dict(color=theme.PALETTE["muted"], width=1.5, dash="3px,3px"),
-            hovertemplate="Detection threshold %{y:g}%<extra></extra>",
+            hoverinfo="skip",
         ))
 
     if shade_codons:
@@ -149,23 +167,20 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
     n_seqs = int((df_counts.sum(axis=1) - df_counts[gap_char]).max())
     pct = f"{min_identity * 100:g}%" if min_identity is not None else "-"
     cards = [
-        {"label": "Aligned reads", "value": f"{n_seqs:,}",
-         "accent": theme.PALETTE["primary"]},
-        {"label": "Min identity", "value": pct,
-         "accent": theme.PALETTE["accent"]},
-        {"label": "Detected positions", "value": f"{len(shade_codons or []):,}",
-         "accent": theme.PALETTE["primary"]},
+        {"label": "Aligned reads", "value": f"{n_seqs:,}"},
+        {"label": "Min identity", "value": pct},
+        {"label": "Detected positions", "value": f"{len(shade_codons or []):,}"},
     ]
     if auto_match_threshold is not None:
         cards.append({"label": "Detection threshold",
-                      "value": f"{auto_match_threshold:g}%",
-                      "accent": theme.PALETTE["muted"]})
+                      "value": f"{auto_match_threshold:g}%"})
     fig.update_layout(
         template=_T, hovermode="x unified",
         title="Alignment to reference insert",
         xaxis_title="Position in reference (1-based, nucleotides)",
         yaxis_title="Percentage (%)",
         margin=dict(t=90),
+        hoverlabel=dict(font=dict(family="monospace", size=12)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         meta={
             "description": "Compares gap frequency with reference-match frequency at each "
@@ -316,16 +331,78 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *, title: str = "Treemap of u
                            "Gini summarizes unevenness: 0 means variants are evenly represented, "
                            "while values closer to 1 mean a few variants dominate.",
             "metric_cards": [
-                {"label": "Unique sequences", "value": f"{len(df):,}",
-                 "accent": theme.PALETTE["primary"]},
-                {"label": "Reads", "value": f"{total:,}",
-                 "accent": theme.PALETTE["accent"]},
-                {"label": "Gini", "value": f"{gini:.3f}",
-                 "accent": theme.PALETTE["secondary"]},
+                {"label": "Unique sequences", "value": f"{len(df):,}"},
+                {"label": "Reads", "value": f"{total:,}"},
+                {"label": "Gini", "value": f"{gini:.3f}"},
             ],
         },
     )
     return fig
+
+
+# 20 standard amino acids ordered by biochemical group so same-group residues
+# sit together in the hover table; colours match the AA pie charts
+# (``theme.AA_COLORS``). Laid out column-major (first 10 left, last 10 right);
+# the group order makes the left column exactly Hydrophobic(8)+Acidic(2) and the
+# right Hydrophilic(4)+Basic(3)+Special(3), so no group straddles the columns.
+_GROUP_ORDER = ("Hydrophobic", "Acidic", "Hydrophilic", "Basic", "Special")
+_AA_BY_GROUP = [aa for group in _GROUP_ORDER
+                for aa in theme.AA_ORDER if theme.AA_GROUPS.get(aa) == group]
+
+
+def _aa_freq_block(counts_row: pd.Series, ref_aa: str | None = None) -> str:
+    """Two-column list of the 20 amino acids with their relative frequency (%)
+    at one codon. Each cell is coloured by biochemical group (see
+    ``theme.AA_COLORS``) and the reference amino acid's cell is bold. Relies on a
+    monospace hover font for column alignment."""
+    total = float(counts_row.sum())
+    half = len(_AA_BY_GROUP) // 2
+
+    def cell(aa: str) -> str:
+        count = float(counts_row.get(aa, 0.0))
+        pct = 100.0 * count / total if total > 0 else 0.0
+        text = f"{aa} {pct:5.1f}%"
+        if aa == ref_aa:
+            text = f"<b>{text}</b>"
+        color = theme.AA_COLORS.get(aa, theme.PALETTE["muted"])
+        return f"<span style='color:{color}'>{text}</span>"
+
+    rows = [f"{cell(_AA_BY_GROUP[i])}   {cell(_AA_BY_GROUP[i + half])}"
+            for i in range(half)]
+    return "<b>AA freq (%):</b><br>" + "<br>".join(rows)
+
+
+def _codon_hover_labels(ref_seq: str, length: int, frame_offset: int,
+                        aa_counts: pd.DataFrame | None = None
+                        ) -> tuple[list[str], list[str] | None]:
+    """Per-nucleotide hover pieces, frame-aligned to
+    :func:`libraont.analysis.detect_variable_codons`.
+
+    Returns ``(codon_heads, aa_blocks)`` as parallel lists. ``codon_heads`` gives
+    the gene codon number for each position (positions before ``frame_offset``
+    report no codon). ``aa_blocks`` is the per-codon two-column AA frequency
+    table (reference amino acid bold), or ``None`` when ``aa_counts`` is not
+    supplied.
+    """
+    ref_up = (ref_seq or "").upper()
+    heads: list[str] = []
+    blocks: list[str] | None = [] if aa_counts is not None else None
+    for j in range(length):
+        if j < frame_offset:
+            heads.append("Codon n/a (outside reading frame)")
+            if blocks is not None:
+                blocks.append("")
+            continue
+        codon = (j - frame_offset) // 3 + 1
+        heads.append(f"<b>Codon:</b> {codon}")
+        if blocks is not None:
+            if codon in aa_counts.index:
+                start = frame_offset + 3 * (codon - 1)
+                ref_aa = GENETIC_CODE.get(ref_up[start:start + 3])
+                blocks.append(_aa_freq_block(aa_counts.loc[codon], ref_aa))
+            else:
+                blocks.append("")
+    return heads, blocks
 
 
 def _empty(message: str, title: str = "") -> go.Figure:

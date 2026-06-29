@@ -101,12 +101,10 @@ def detect_variable_codons(df_counts: pd.DataFrame, ref_seq: str, min_match_pct:
     return sorted(codons)
 
 
-def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset: int = 0,
-                       weights: dict[str, int] | None = None):
+def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset: int = 0):
     """Amino-acid counts per codon position from reference columns (REF != '-').
 
-    - ``frame_offset`` (0/1/2): where the ORF starts relative to the first REF base.
-    - ``weights``: optional ``{name: int}`` if aligned sequences were deduplicated.
+    ``frame_offset`` (0/1/2) is where the ORF starts relative to the first REF base.
 
     Returns ``(df_aa_counts, df_aa_freq, ref_codons)``.
     """
@@ -123,7 +121,6 @@ def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset:
     for name, row in msa.items():
         if name == ref_name:
             continue
-        w = int(weights.get(name, 1)) if weights else 1
         seq = row.upper()
         for k, (c0, c1, c2) in enumerate(ref_codons):
             b0, b1, b2 = seq[c0], seq[c1], seq[c2]
@@ -132,7 +129,7 @@ def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset:
             aa = GENETIC_CODE.get(b0 + b1 + b2)
             if aa is None:
                 continue
-            counts[k, _AA_IDX[aa]] += w
+            counts[k, _AA_IDX[aa]] += 1
 
     df_counts = pd.DataFrame(counts, columns=AA_ORDER, index=np.arange(1, num_codons + 1))
     df_counts.index.name = "codon_position"

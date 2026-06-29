@@ -27,7 +27,7 @@ def collapse_whitespace(seq: str) -> str:
 
 def extract_target(gene_seq: str, start_pos: int, stop_pos: int) -> str:
     """Insert/target region: clean ``gene_seq`` then slice 1-based inclusive
-    ``[start_pos, stop_pos]`` (identical to the notebook's target derivation)."""
+    ``[start_pos, stop_pos]``."""
     return clean_sequence(gene_seq)[start_pos - 1:stop_pos]
 
 
