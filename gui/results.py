@@ -41,8 +41,10 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
         if aa_fig is not None:
             figs.append(("AA distribution", aa_fig))
         if report.hap_df is not None:
-            figs.append(("Variant treemap",
-                         plots.haplotype_treemap_figure(report.hap_df)))
+            figs.append(("Variant treemap", plots.haplotype_treemap_figure(
+                report.hap_df, aa_counts=report.df_aa_counts,
+                positions=report.valid_positions, min_frac=p.pie_min_frac,
+                include_rare=p.include_rare_variants)))
     return figs
 
 

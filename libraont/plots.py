@@ -387,12 +387,44 @@ def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *, min_frac: float = 0
     return fig
 
 
+def _rare_aa_by_position(aa_counts: pd.DataFrame | None, positions, min_frac: float) -> dict:
+    """Per codon position, the set of amino acids whose frequency is below
+    ``min_frac`` - i.e. those folded into the 'Other' slice in the AA pies."""
+    rare: dict[int, set[str]] = {}
+    if aa_counts is None or not positions or min_frac <= 0:
+        return rare
+    for pos in positions:
+        if pos not in aa_counts.index:
+            continue
+        row = aa_counts.loc[pos].astype(float)
+        total = row.sum()
+        if total > 0:
+            rare[pos] = {aa for aa, count in row.items() if count / total < min_frac}
+    return rare
+
+
 def haplotype_treemap_figure(hap_df: pd.DataFrame, *, title: str = "Treemap of unique variants",
-                             top_n: int | None = None) -> go.Figure:
+                             top_n: int | None = None, aa_counts: pd.DataFrame | None = None,
+                             positions=None, min_frac: float = 0.0,
+                             include_rare: bool = True) -> go.Figure:
     """Treemap of haplotypes sized by count; if ``top_n`` is set, fold the rest
-    into 'Other'. The subtitle reports the Gini coefficient of the distribution."""
+    into 'Other'. The subtitle reports the Gini coefficient of the distribution.
+
+    When ``include_rare`` is False, variants containing an amino acid below
+    ``min_frac`` at its codon position (a rare/'Other' residue in the AA pies)
+    are excluded, and the summary stats reflect the remaining subset."""
     if hap_df.empty:
         return _empty("No haplotypes to display", title)
+
+    if not include_rare:
+        rare_by_pos = _rare_aa_by_position(aa_counts, positions, min_frac)
+        if rare_by_pos:
+            def _has_rare(combo_tuple) -> bool:
+                return isinstance(combo_tuple, tuple) and any(
+                    aa in rare_by_pos.get(pos, ()) for pos, aa in zip(positions, combo_tuple))
+            hap_df = hap_df[~hap_df["combo_tuple"].map(_has_rare)]
+        if hap_df.empty:
+            return _empty("No variants remain after excluding rare amino acids", title)
 
     df = hap_df[["combo_label", "count"]].copy()
     df["is_reference"] = hap_df.get("is_reference", False)

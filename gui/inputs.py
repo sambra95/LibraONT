@@ -166,6 +166,11 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                                        help="AA-distribution plot only: amino acids below "
                                             "this frequency are folded into a single "
                                             "'Other' slice.")
+        include_rare_variants = st.toggle(
+            "Include rare variants", value=True,
+            help="Variant treemap only: when off, variants containing an amino acid below the "
+                 "grouping threshold at its codon position (an 'Other' residue) are excluded, "
+                 "and the treemap stats reflect the remaining variants.")
 
         tool_paths = _tool_paths()
         run = st.button("Run analysis", type="primary", use_container_width=True)
@@ -189,6 +194,7 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         max_read_len=int(max_read_len) if max_read_len is not None else None,
         plasmid_seq=plasmid_seq.strip() or None,
         pie_positions=positions, pie_min_frac=float(pie_min_frac),
+        include_rare_variants=bool(include_rare_variants),
         auto_codon_match_pct=float(auto_pct) if auto_pct is not None else None,
         tool_paths=tool_paths)
     return params, run, None

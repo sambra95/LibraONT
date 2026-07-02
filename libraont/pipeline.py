@@ -39,6 +39,9 @@ class AnalysisParams:
     plasmid_seq: Optional[str] = None
     pie_positions: list[int] = field(default_factory=list)
     pie_min_frac: float = DEFAULT_PIE_MIN_FRAC
+    # When False, variant-treemap variants that contain an amino acid below
+    # ``pie_min_frac`` at its codon position (an 'Other' residue) are excluded.
+    include_rare_variants: bool = True
     # When set, codons with a position below this reference-match % are auto-added
     # to ``pie_positions`` (variable-codon detection). ``None`` disables it.
     auto_codon_match_pct: Optional[float] = None
