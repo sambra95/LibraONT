@@ -101,6 +101,14 @@ def detect_variable_codons(df_counts: pd.DataFrame, ref_seq: str, min_match_pct:
     return sorted(codons)
 
 
+def _aa_from_triplet(b0: str, b1: str, b2: str) -> str | None:
+    """Translate one codon, or ``None`` if it has a gap/ambiguous base or no
+    entry in the genetic code."""
+    if '-' in (b0, b1, b2) or any(b not in "ACGT" for b in (b0, b1, b2)):
+        return None
+    return GENETIC_CODE.get(b0 + b1 + b2)
+
+
 def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset: int = 0):
     """Amino-acid counts per codon position from reference columns (REF != '-').
 
@@ -123,10 +131,7 @@ def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset:
             continue
         seq = row.upper()
         for k, (c0, c1, c2) in enumerate(ref_codons):
-            b0, b1, b2 = seq[c0], seq[c1], seq[c2]
-            if '-' in (b0, b1, b2) or any(b not in "ACGT" for b in (b0, b1, b2)):
-                continue
-            aa = GENETIC_CODE.get(b0 + b1 + b2)
+            aa = _aa_from_triplet(seq[c0], seq[c1], seq[c2])
             if aa is None:
                 continue
             counts[k, _AA_IDX[aa]] += 1
@@ -135,12 +140,6 @@ def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset:
     df_counts.index.name = "codon_position"
     row_sums = df_counts.sum(axis=1).replace(0, np.nan)
     return df_counts, df_counts.div(row_sums, axis=0), ref_codons
-
-
-def _aa_from_triplet(b0: str, b1: str, b2: str) -> str | None:
-    if '-' in (b0, b1, b2) or any(b not in "ACGT" for b in (b0, b1, b2)):
-        return None
-    return GENETIC_CODE.get(b0 + b1 + b2)
 
 
 def get_ref_codons(msa: dict[str, str], ref_name: str = "REF") -> list[tuple[int, int, int]]:

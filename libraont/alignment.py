@@ -13,16 +13,18 @@ tool is missing rather than crashing.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import edlib
 import numpy as np
 
-from .sequences import read_fastq_records, revcomp, write_fasta, collapse_whitespace
+from .sequences import (filter_fastq_by_length, read_fastq_records, revcomp,
+                        write_fasta, collapse_whitespace)
 
 # Map a logical tool name to the env var that can override its path.
 _ENV_VARS = {"mafft": "MAFFT_BIN", "minimap2": "MINIMAP2_BIN", "samtools": "SAMTOOLS_BIN"}
@@ -84,13 +86,37 @@ def tool_versions(overrides: dict[str, str] | None = None) -> dict[str, str | No
 
 
 # --- Orientation + trimming -------------------------------------------------
+_EDLIB_CIGAR_RE = re.compile(r"(\d+)([=XID])")
+
+
+def _overlap_identity(cigar: str) -> float:
+    """Identity over the overlapping region of an edlib HW alignment (query = the
+    reference insert). Terminal ``I`` runs - insert bases the read does not reach -
+    are excluded, so a truncated but accurate read is scored only on the portion it
+    covers, not penalised for partial coverage.
+    """
+    ops = [(int(n), op) for n, op in _EDLIB_CIGAR_RE.findall(cigar)]
+    while ops and ops[0][1] == "I":
+        ops.pop(0)
+    while ops and ops[-1][1] == "I":
+        ops.pop()
+    matches = sum(n for n, op in ops if op == "=")
+    columns = sum(n for n, op in ops)
+    return matches / columns if columns else 0.0
+
+
 def edlib_orient_trim_and_quality(fastq_path: str, target: str, min_identity: float = 0.65,
-                                  pad: int = 200,
-                                  drop_short: bool = True) -> tuple[list[tuple[str, str]],
-                                                                    float | None]:
+                                  pad: int = 200, drop_short: bool = True,
+                                  min_read_len: int | None = None,
+                                  max_read_len: int | None = None,
+                                  ) -> tuple[list[tuple[str, str]], float | None]:
     """For each read: find the best strand/placement vs ``target`` (edlib HW),
-    trim to ``[start-pad : end+1+pad]`` on that strand, and keep it only if
-    identity >= ``min_identity``.
+    trim to ``[start-pad : end+1+pad]`` on that strand, and keep it only if its
+    identity over the overlapping region (see :func:`_overlap_identity`) is
+    >= ``min_identity`` - partial coverage of the insert is not penalised.
+
+    Reads whose raw length falls outside ``[min_read_len, max_read_len]`` are
+    skipped (either bound may be ``None`` to disable it).
 
     Returns kept sequences plus the mean Phred score across kept full reads.
     """
@@ -102,6 +128,10 @@ def edlib_orient_trim_and_quality(fastq_path: str, target: str, min_identity: fl
         r = seq.strip().upper()
         if not r:
             continue
+        if min_read_len is not None and len(r) < min_read_len:
+            continue
+        if max_read_len is not None and len(r) > max_read_len:
+            continue
 
         rf = edlib.align(target, r, task="path", mode="HW")
         rr = edlib.align(target, revcomp(r), task="path", mode="HW")
@@ -109,7 +139,7 @@ def edlib_orient_trim_and_quality(fastq_path: str, target: str, min_identity: fl
         res = rr if use_rev else rf
         if not res["locations"]:
             continue
-        if 1.0 - res["editDistance"] / max(1, L) < min_identity:
+        if _overlap_identity(res["cigar"]) < min_identity:
             continue
 
         rseq = revcomp(r) if use_rev else r
@@ -202,11 +232,59 @@ class CoverageResult:
     mapped_reads: int
     contig: str
     region: dict | None = None  # {'start','end','strand'} or None
+    # Per-read alignment span on the contig (1-based inclusive) and identity, for
+    # the read-alignment map. Parallel arrays over primary alignments.
+    read_starts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    read_ends: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    read_identities: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=float))
+    contig_length: int = 0
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           universal_newlines=True, check=True, **kw)
+
+
+# CIGAR operations by what they consume: reference span (a read's footprint on
+# the contig) and alignment columns (the denominator for BLAST-style identity).
+_CIGAR_RE = re.compile(r"(\d+)([MIDNSHP=X])")
+_REF_CONSUMING = frozenset("MDN=X")
+_ALN_COLUMNS = frozenset("MIDN=X")
+
+
+def _read_intervals(samtools: str, bam: str, contig: str
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-read (start, end, identity) for primary alignments to ``contig``.
+
+    Excludes unmapped/secondary/supplementary records (``-F 0x904``). Positions
+    are 1-based inclusive on the contig; identity is BLAST-style
+    ``1 - NM/aligned_columns`` (``nan`` when the ``NM`` tag is absent).
+    """
+    view = _run([samtools, "view", "-F", "0x904", bam, contig])
+    starts, ends, idents = [], [], []
+    for line in view.stdout.splitlines():
+        f = line.split("\t")
+        if len(f) < 6:
+            continue
+        cigar = f[5]
+        if cigar == "*":
+            continue
+        ref_span = columns = 0
+        for n, op in _CIGAR_RE.findall(cigar):
+            length = int(n)
+            if op in _REF_CONSUMING:
+                ref_span += length
+            if op in _ALN_COLUMNS:
+                columns += length
+        if ref_span <= 0:
+            continue
+        pos = int(f[3])
+        starts.append(pos)
+        ends.append(pos + ref_span - 1)
+        nm = next((int(t[5:]) for t in f[11:] if t.startswith("NM:i:")), None)
+        idents.append(1.0 - nm / columns if (nm is not None and columns > 0) else np.nan)
+    return (np.asarray(starts, dtype=int), np.asarray(ends, dtype=int),
+            np.asarray(idents, dtype=float))
 
 
 def _fetch_contig_seq(samtools: str, ref_fasta: str, contig: str) -> str:
@@ -217,16 +295,26 @@ def _fetch_contig_seq(samtools: str, ref_fasta: str, contig: str) -> str:
 
 def compute_coverage(reference_seq: str, fastq_in: str, inner_seq: str | None,
                      minimap2_bin: str, samtools_bin: str, threads: int = 4,
-                     allow_revcomp: bool = True) -> CoverageResult:
-    """Align all reads to ``reference_seq`` (minimap2 -> sorted/indexed BAM via
+                     allow_revcomp: bool = True, min_read_len: int | None = None,
+                     max_read_len: int | None = None) -> CoverageResult:
+    """Align reads to ``reference_seq`` (minimap2 -> sorted/indexed BAM via
     samtools), then return per-base coverage as a fraction of max depth, plus an
-    optional exact-match highlight for ``inner_seq`` (forward or reverse complement)."""
+    optional exact-match highlight for ``inner_seq`` (forward or reverse complement).
+
+    When ``min_read_len``/``max_read_len`` are set, only reads whose length is in
+    that window are mapped, so the coverage and per-read map reflect the same
+    length-filtered dataset used by the rest of the analysis."""
     workdir = tempfile.mkdtemp(prefix="libraont_cov_")
     ref_fasta = write_fasta(reference_seq, os.path.join(workdir, "reference.fa"), name="ref1")
     bam = os.path.join(workdir, "all_reads.bam")
 
+    reads_in = fastq_in
+    if min_read_len is not None or max_read_len is not None:
+        reads_in = os.path.join(workdir, "length_filtered.fastq")
+        filter_fastq_by_length(fastq_in, reads_in, min_read_len, max_read_len)
+
     mm2 = subprocess.Popen([minimap2_bin, "-x", "map-ont", "-a", "-t", str(threads),
-                            "--secondary=no", ref_fasta, fastq_in], stdout=subprocess.PIPE)
+                            "--secondary=no", ref_fasta, reads_in], stdout=subprocess.PIPE)
     sort = subprocess.Popen([samtools_bin, "sort", "-o", bam], stdin=mm2.stdout)
     mm2.stdout.close()
     if sort.wait() != 0 or mm2.wait() != 0:
@@ -239,11 +327,11 @@ def compute_coverage(reference_seq: str, fastq_in: str, inner_seq: str | None,
     for line in idx.stdout.strip().splitlines():
         name, length, mapped, _ = line.split("\t")
         if name != "*" and int(length) > 0:
-            contigs.append((name, int(mapped)))
+            contigs.append((name, int(length), int(mapped)))
     if not contigs:
         raise RuntimeError("No valid contigs found in BAM index.")
-    contigs.sort(key=lambda x: x[1], reverse=True)
-    contig, mapped_reads = contigs[0]
+    contigs.sort(key=lambda x: x[2], reverse=True)
+    contig, contig_length, mapped_reads = contigs[0]
 
     depth = _run([samtools_bin, "depth", "-d", "0", "-r", contig, bam])
     if not depth.stdout.strip():
@@ -270,5 +358,9 @@ def compute_coverage(reference_seq: str, fastq_in: str, inner_seq: str | None,
         if hit != -1:
             region = {"start": hit + 1, "end": hit + len(q), "strand": strand}
 
+    read_starts, read_ends, read_idents = _read_intervals(samtools_bin, bam, contig)
+
     shutil.rmtree(workdir, ignore_errors=True)
-    return CoverageResult(positions, fractions, mapped_reads, contig, region)
+    return CoverageResult(positions, fractions, mapped_reads, contig, region,
+                          read_starts=read_starts, read_ends=read_ends,
+                          read_identities=read_idents, contig_length=contig_length)

@@ -49,11 +49,13 @@ def run_analysis(params: AnalysisParams, progress=None) -> Report:
 
     step(0.10, "Aligning reads")
     msa_key = (params.fastq_path, params.gene_seq, params.start_pos, params.stop_pos,
-               params.min_identity, params.pad, _tool_key(params))
+               params.min_identity, params.pad, params.min_read_len, params.max_read_len,
+               _tool_key(params))
     msa = _cached_msa(msa_key, params)
 
     step(0.65, "Computing coverage")
-    cov_key = (params.fastq_path, params.plasmid_seq, msa.target, _tool_key(params))
+    cov_key = (params.fastq_path, params.plasmid_seq, msa.target,
+               params.min_read_len, params.max_read_len, _tool_key(params))
     coverage = _cached_coverage(cov_key, params, msa.target)
 
     # Downstream tabulation is cheap and not cached, so it always re-runs and may

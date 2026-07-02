@@ -66,6 +66,47 @@ def read_length_counts(path: str) -> Counter:
     return counts
 
 
+def filter_fastq_by_length(in_path: str, out_path: str, min_len: int | None,
+                          max_len: int | None) -> int:
+    """Copy FASTQ records whose sequence length is within ``[min_len, max_len]``
+    (either bound may be ``None``) from ``in_path`` to ``out_path`` (plain text).
+    Preserves headers/qualities; supports gzipped input. Returns the kept count."""
+    kept = 0
+    with _open_text(in_path) as fin, open(out_path, "w", encoding="utf-8") as fout:
+        while True:
+            header = fin.readline()
+            if not header:
+                break
+            seq = fin.readline()
+            plus = fin.readline()
+            qual = fin.readline()
+            if not qual:
+                break
+            n = len(seq.strip())
+            if min_len is not None and n < min_len:
+                continue
+            if max_len is not None and n > max_len:
+                continue
+            fout.write(header)
+            fout.write(seq)
+            fout.write(plus)
+            fout.write(qual)
+            kept += 1
+    return kept
+
+
+def read_length_range(path: str) -> tuple[int, int] | None:
+    """Shortest and longest read length in a FASTQ (``None`` if empty)."""
+    lo = hi = None
+    for seq in read_fastq(path):
+        n = len(seq)
+        if lo is None or n < lo:
+            lo = n
+        if hi is None or n > hi:
+            hi = n
+    return None if lo is None else (lo, hi)
+
+
 def write_fasta(seq: str, out_fa: str, name: str = "ref1", width: int = 60) -> str:
     """Write a single sequence to FASTA (``width`` chars/line). Returns the path."""
     s = collapse_whitespace(seq)

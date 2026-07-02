@@ -32,6 +32,10 @@ class AnalysisParams:
     fastq_name: Optional[str] = None
     min_identity: float = DEFAULT_MIN_IDENTITY
     pad: int = DEFAULT_PAD
+    # Raw-read length window: reads outside ``[min_read_len, max_read_len]`` are
+    # dropped before alignment. ``None`` on either side disables that bound.
+    min_read_len: Optional[int] = None
+    max_read_len: Optional[int] = None
     plasmid_seq: Optional[str] = None
     pie_positions: list[int] = field(default_factory=list)
     pie_min_frac: float = DEFAULT_PIE_MIN_FRAC
@@ -93,7 +97,8 @@ def compute_msa(params: AnalysisParams, tools: Optional[dict] = None,
     step(0.15, "Orienting and trimming reads (edlib)…")
     seqs_named, mean_phred = alignment.edlib_orient_trim_and_quality(
         params.fastq_path, target, min_identity=params.min_identity,
-        pad=params.pad)
+        pad=params.pad, min_read_len=params.min_read_len,
+        max_read_len=params.max_read_len)
     if len(seqs_named) <= 1:
         raise RuntimeError("No reads passed trimming/orientation. "
                            "Try lowering min_identity or increasing pad.")
@@ -124,7 +129,8 @@ def compute_coverage(params: AnalysisParams, target: str, tools: Optional[dict] 
     _stepper(progress)(0.92, "Computing coverage (minimap2 + samtools)…")
     return alignment.compute_coverage(
         params.plasmid_seq, params.fastq_path, inner_seq=target,
-        minimap2_bin=tools["minimap2"], samtools_bin=tools["samtools"])
+        minimap2_bin=tools["minimap2"], samtools_bin=tools["samtools"],
+        min_read_len=params.min_read_len, max_read_len=params.max_read_len)
 
 
 def tabulate_report(params: AnalysisParams, msa_result: MsaResult,

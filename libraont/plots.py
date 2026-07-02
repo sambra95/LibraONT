@@ -46,8 +46,11 @@ _AA_NAMES: dict[str, str] = {
 }
 
 
-def read_length_figure(length_counts: Counter) -> go.Figure:
-    """Bar chart of read-length frequencies binned every 10 bp."""
+def read_length_figure(length_counts: Counter, min_read_len: int | None = None,
+                       max_read_len: int | None = None) -> go.Figure:
+    """Bar chart of read-length frequencies binned every 10 bp. This plot always
+    covers *all* reads; dashed lines mark the min/max read-length cutoffs that
+    filter reads out of every other plot."""
     if not length_counts:
         return _empty("No reads found")
     bin_counts: Counter = Counter()
@@ -60,18 +63,40 @@ def read_length_figure(length_counts: Counter) -> go.Figure:
         marker_color=theme.PALETTE["primary"],
         hovertemplate="Length %{customdata}<br>%{y} reads<extra></extra>",
     ))
+    for value, label in ((min_read_len, "min"), (max_read_len, "max")):
+        if value is not None:
+            fig.add_vline(x=value, line=dict(color=theme.PALETTE["muted"], width=1, dash="dash"),
+                          annotation_text=label, annotation_position="top",
+                          annotation=dict(font=dict(size=11, color=theme.PALETTE["muted"])))
     fig.update_layout(
         template=_T, title="Read length distribution",
         xaxis_title="Read length bin (bp)", yaxis_title="Count", bargap=0.05,
-        meta={"description": "Shows how many reads fall into each 10 bp length bin. Use it to spot "
-                             "the dominant library size and any unexpected short or long reads."},
+        meta={"description": "Shows how many reads fall into each 10 bp length bin (all reads). "
+                             "Dashed lines mark the min/max read-length cutoffs; reads outside "
+                             "them are excluded from every other plot and the analysis."},
     )
     return fig
 
 
+# Theme red used for the insert marker bar/label.
+_INSERT_RED = "#C44E5A"
+
+
+def _insert_marker(fig: go.Figure, start: float, end: float) -> None:
+    """Mark the insert with a red bar (labelled "insert") in the margin just
+    above the plot, spanning ``[start, end]`` on the x-axis."""
+    fig.add_shape(type="rect", xref="x", yref="paper",
+                  x0=start, x1=end, y0=1.02, y1=1.05,
+                  fillcolor=_INSERT_RED, line_width=0, layer="above")
+    fig.add_annotation(xref="x", yref="paper", x=(start + end) / 2, y=1.06,
+                       text="insert", showarrow=False, yanchor="bottom",
+                       font=dict(size=11, color=_INSERT_RED))
+
+
 def coverage_figure(cov: CoverageResult) -> go.Figure:
     """Per-base coverage as a fraction of max depth, with optional insert highlight."""
-    cards = [{"label": "Mapped reads", "value": f"{cov.mapped_reads:,}"}]
+    cards = [{"label": "Reads mapped to plasmid", "value": f"{cov.mapped_reads:,}",
+              "sub": "aligned to whole plasmid (minimap2)"}]
     fig = go.Figure(go.Scatter(
         x=cov.positions, y=cov.fractions, mode="lines",
         line=dict(color=theme.PALETTE["primary"], width=1.6), name="Fraction",
@@ -79,14 +104,13 @@ def coverage_figure(cov: CoverageResult) -> go.Figure:
         hovertemplate="Pos %{x}<br>Frac %{y:.3f}<extra></extra>",
     ))
     if cov.region:
-        fig.add_vrect(x0=cov.region["start"], x1=cov.region["end"],
-                      fillcolor=theme.PALETTE["accent_soft"], line_width=0, layer="below")
+        _insert_marker(fig, cov.region["start"], cov.region["end"])
         cards.append({"label": "Insert",
                       "value": f"{cov.region['start']}-{cov.region['end']}"})
     fig.update_layout(
         template=_T, title="Coverage fraction", xaxis_title="Position (bp)",
         yaxis_title="Fraction of overlapping reads",
-        yaxis=dict(range=[0, 1]), height=360,
+        yaxis=dict(range=[0, 1]), height=360, margin=dict(t=72),
         meta={
             "description": "Shows normalized read coverage across the plasmid. Regions near 1 "
                            "have the strongest support; drops indicate that a fraction of the "
@@ -97,11 +121,87 @@ def coverage_figure(cov: CoverageResult) -> go.Figure:
     return fig
 
 
+# Sequential colour scale for read-to-reference identity: low = warm red,
+# mid = amber, high = teal. Always applied over a fixed 0-100% range.
+_IDENTITY_SCALE = [[0.0, "#C44E5A"], [0.5, "#E0B252"], [1.0, theme.PALETTE["primary"]]]
+
+
+def read_alignment_figure(cov: CoverageResult) -> go.Figure:
+    """Map of where each read aligns on the plasmid: one horizontal bar per read
+    (its own row, ordered by start position), coloured by the read's percent
+    identity to its aligned section, with the insert region shaded. Reads are
+    *not* stacked onto shared rows, so every read stays individually visible."""
+    starts, ends, idents = cov.read_starts, cov.read_ends, cov.read_identities
+    n_total = int(starts.shape[0])
+    if n_total == 0:
+        return _empty("No reads aligned to the plasmid")
+
+    # Order by start (then end) so the pileup reads as a staircase. Every read
+    # gets its own row (no subsampling); for deep libraries the rows compress to
+    # sub-pixel bars, reading as a dense pileup.
+    order = np.lexsort((ends, starts))
+    starts, ends, idents = starts[order], ends[order], idents[order]
+    n_shown = n_total
+    rows = np.arange(n_shown)
+
+    # Compact: ~1 px per read row, clamped so the panel never dominates.
+    _T_MARGIN, _B_MARGIN = 60, 48
+    height = int(min(700, max(160, n_shown + _T_MARGIN + _B_MARGIN + 20)))
+
+    ident_pct = idents * 100.0
+    finite = np.isfinite(ident_pct)
+    # Fixed 0-100% colour range; reads with no identity (missing NM) fall back
+    # to the low end so they still render.
+    color = np.where(finite, ident_pct, 0.0)
+
+    fig = go.Figure(go.Bar(
+        y=rows, x=(ends - starts + 1), base=starts, orientation="h", width=1.0,
+        marker=dict(color=color, colorscale=_IDENTITY_SCALE, cmin=0.0, cmax=100.0,
+                    line_width=0,
+                    colorbar=dict(title=dict(text="Identity to<br>reference (%)",
+                                             side="right"),
+                                  thickness=12, len=0.9, ticksuffix="%")),
+        customdata=np.column_stack([starts, ends, ident_pct]),
+        hovertemplate="%{customdata[0]}–%{customdata[1]} bp<br>"
+                      "Identity %{customdata[2]:.1f}%<extra></extra>",
+    ))
+
+    cards = [{"label": "Reads on map", "value": f"{n_shown:,}", "sub": "one bar per read"}]
+    if finite.any():
+        cards.append({"label": "Median identity",
+                      "value": f"{np.median(ident_pct[finite]):.1f}%"})
+    if cov.region:
+        _insert_marker(fig, cov.region["start"], cov.region["end"])
+        cards.append({"label": "Insert",
+                      "value": f"{cov.region['start']}-{cov.region['end']}"})
+
+    x_max = cov.contig_length or int(ends.max())
+    fig.update_layout(
+        template=_T, title="Read alignment map", height=height, showlegend=False,
+        bargap=0,
+        xaxis=dict(title="Plasmid position (bp)", range=[0, x_max], zeroline=False,
+                   showline=True, showticklabels=True, ticks="outside"),
+        yaxis=dict(range=[-1, n_shown], showgrid=False, zeroline=False,
+                   showticklabels=False, title=""),
+        margin=dict(l=48, r=88, t=_T_MARGIN + 12, b=_B_MARGIN),
+        meta={
+            "description": "Each horizontal bar is a single read, drawn on its own row, "
+                           "positioned where it aligns to the plasmid and coloured by its "
+                           "percent identity to that aligned section. Rows are ordered by start "
+                           "position; a red bar above the plot marks the insert.",
+            "metric_cards": cards,
+        },
+    )
+    return fig
+
+
 def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "-",
                      shade_codons=None, frame_offset: int = 0,
                      min_identity: float | None = None,
                      auto_match_threshold: float | None = None,
-                     aa_counts: pd.DataFrame | None = None) -> go.Figure:
+                     aa_counts: pd.DataFrame | None = None,
+                     reads_passing: int | None = None,
+                     reads_total: int | None = None) -> go.Figure:
     """Per-position gap % (counts['-'] / row total) and reference-match %
     (gaps excluded from the denominator), optionally shading full codons and
     showing the auto-detect reference-match cutoff.
@@ -164,10 +264,22 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
             fig.add_vrect(x0=max(1, nt_start) - 0.5, x1=min(L, nt_end) + 0.5,
                           fillcolor=theme.PALETTE["accent_soft"], line_width=0, layer="below")
 
-    n_seqs = int((df_counts.sum(axis=1) - df_counts[gap_char]).max())
     pct = f"{min_identity * 100:g}%" if min_identity is not None else "-"
+    # Reads passing / failing the insert filter (fall back to the aligned-read
+    # count from the MSA when the report-level totals are not supplied).
+    if reads_passing is not None and reads_total is not None:
+        failing = max(reads_total - reads_passing, 0)
+        pass_sub = f"{reads_passing / reads_total * 100:.1f}% of {reads_total:,}" if reads_total else ""
+        fail_sub = f"{failing / reads_total * 100:.1f}% of {reads_total:,}" if reads_total else ""
+        read_cards = [
+            {"label": "Passed insert filter", "value": f"{reads_passing:,}", "sub": pass_sub},
+            {"label": "Failed insert filter", "value": f"{failing:,}", "sub": fail_sub},
+        ]
+    else:
+        n_seqs = int((df_counts.sum(axis=1) - df_counts[gap_char]).max())
+        read_cards = [{"label": "Aligned reads", "value": f"{n_seqs:,}"}]
     cards = [
-        {"label": "Aligned reads", "value": f"{n_seqs:,}"},
+        *read_cards,
         {"label": "Min identity", "value": pct},
         {"label": "Detected positions", "value": f"{len(shade_codons or []):,}"},
     ]
@@ -394,11 +506,12 @@ def _codon_hover_labels(ref_seq: str, length: int, frame_offset: int,
                 blocks.append("")
             continue
         codon = (j - frame_offset) // 3 + 1
-        heads.append(f"<b>Codon:</b> {codon}")
+        start = frame_offset + 3 * (codon - 1)
+        ref_aa = GENETIC_CODE.get(ref_up[start:start + 3])
+        label = f"{ref_aa}{codon}" if ref_aa else f"{codon}"
+        heads.append(f"<b>Codon:</b> {label}")
         if blocks is not None:
             if codon in aa_counts.index:
-                start = frame_offset + 3 * (codon - 1)
-                ref_aa = GENETIC_CODE.get(ref_up[start:start + 3])
                 blocks.append(_aa_freq_block(aa_counts.loc[codon], ref_aa))
             else:
                 blocks.append("")

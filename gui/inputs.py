@@ -11,7 +11,14 @@ from libraont import alignment
 from libraont.constants import (DEFAULT_MIN_IDENTITY, DEFAULT_PAD,
                                 DEFAULT_PIE_MIN_FRAC)
 from libraont.pipeline import AnalysisParams
-from libraont.sequences import clean_sequence
+from libraont.sequences import clean_sequence, read_length_range
+
+
+@st.cache_data(show_spinner=False)
+def _cached_length_range(path: str, key: tuple) -> tuple[int, int] | None:
+    """Min/max raw read length in the FASTQ, cached per upload (``key``)."""
+    return read_length_range(path)
+
 
 _TOOL_LABELS = {"mafft": "MAFFT", "minimap2": "minimap2", "samtools": "samtools"}
 
@@ -107,18 +114,38 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                                        max_value=max(gene_len, 1), value=max(gene_len, 1),
                                        help="Last base of the region of interest (inclusive).")
 
-        min_identity = st.slider("Minimum identity", 0.0, 1.0, DEFAULT_MIN_IDENTITY, 0.01,
-                                 help="Minimum alignment identity to the reference; "
-                                      "reads below this are discarded. Lower it if too "
-                                      "few reads are kept.")
         pad = st.number_input("Padding (bp)", min_value=0, value=DEFAULT_PAD, step=10,
                               help="Extra bases kept on each side of the matched region "
                                    "when trimming each read. Increase to retain flanks.")
 
-        st.subheader("Plot settings")
-        st.caption("Change how results are displayed without re-running the "
-                   "analysis. Codon selection drives the AA-distribution pies and "
-                   "variant treemap (and marks a cutoff on the alignment plot).")
+        # Read-length window, bounded and defaulted to the range actually present
+        # in the uploaded FASTQ. Reads outside the selected window are discarded
+        # before alignment.
+        min_read_len = max_read_len = None
+        cached_upload = st.session_state.get("_fastq_upload")
+        if fastq_path and cached_upload:
+            rng = _cached_length_range(fastq_path, cached_upload["key"])
+            if rng and rng[0] < rng[1]:
+                lo, hi = rng
+                min_read_len, max_read_len = st.slider(
+                    "Read length range (bp)", lo, hi, (lo, hi),
+                    help="Only reads whose length falls within this window are kept. "
+                         "Bounds default to the shortest and longest read in the FASTQ.")
+            elif rng:
+                st.caption(f"All reads are {rng[0]} bp long; no length filtering applied.")
+
+        st.subheader("Library Analysis settings")
+        st.caption("Adjust the analysis and how results are displayed. The identity "
+                   "filter re-runs the alignment; codon/pie settings update instantly. "
+                   "Codon selection drives the AA-distribution pies and variant treemap "
+                   "(and marks a cutoff on the alignment plot).")
+        min_identity = st.slider(
+            "Minimum identity", 0.0, 1.0, DEFAULT_MIN_IDENTITY, 0.01,
+            help="Minimum identity to the reference insert. Reads that don't align to the "
+                 "insert at or above this are discarded - this is the filter behind the "
+                 "'Alignment to reference insert' plot, and it sets the reads used across "
+                 "the analysis (AA distribution and variant treemap too). Lower it if too "
+                 "few reads pass.")
         auto_detect = st.toggle(
             "Auto-detect variable codons", value=False,
             help="Use reference-match % to select codons automatically.")
@@ -158,6 +185,8 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         start_pos=int(start_pos), stop_pos=int(stop_pos),
         fastq_name=fastq_name,
         min_identity=float(min_identity), pad=int(pad),
+        min_read_len=int(min_read_len) if min_read_len is not None else None,
+        max_read_len=int(max_read_len) if max_read_len is not None else None,
         plasmid_seq=plasmid_seq.strip() or None,
         pie_positions=positions, pie_min_frac=float(pie_min_frac),
         auto_codon_match_pct=float(auto_pct) if auto_pct is not None else None,

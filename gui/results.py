@@ -21,15 +21,19 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
     """Ordered (title, figure) pairs in report layout order."""
     p = report.params
     figs: list[tuple[str, object]] = [
-        ("Read lengths", plots.read_length_figure(report.length_counts)),
+        ("Read lengths", plots.read_length_figure(
+            report.length_counts, p.min_read_len, p.max_read_len)),
     ]
     if report.coverage is not None:
+        figs.append(("Read alignment map", plots.read_alignment_figure(report.coverage)))
         figs.append(("Plasmid coverage", plots.coverage_figure(report.coverage)))
     figs.append(("Gap & match %", plots.gap_match_figure(
         report.df_counts, ref_seq=report.target[:len(report.df_counts)],
         shade_codons=report.valid_positions or None, frame_offset=0,
         min_identity=p.min_identity, auto_match_threshold=p.auto_codon_match_pct,
-        aa_counts=report.df_aa_counts)))
+        aa_counts=report.df_aa_counts,
+        reads_passing=report.n_reads_kept,
+        reads_total=sum(report.length_counts.values()))))
 
     if report.valid_positions:
         aa_fig = plots.aa_pies_figure(
@@ -114,20 +118,12 @@ def _figure_description(fig: go.Figure) -> None:
 
 def _summary_cards(report: Report) -> list[str]:
     """Summary card HTML shared by Streamlit rendering and HTML export."""
-    total = sum(report.length_counts.values())
-    kept = report.n_reads_kept
-    discarded = max(total - kept, 0)
-    kept_sub = f"{kept / total * 100:.1f}% of {total:,}" if total else ""
-    disc_sub = f"{discarded / total * 100:.1f}% of {total:,}" if total else ""
-
     if report.hap_df is not None and not report.hap_df.empty:
         variants, var_sub = f"{len(report.hap_df):,}", f"Gini {haplotype_gini(report.hap_df):.3f}"
     else:
         variants, var_sub = "-", "no codon positions"
 
     return [
-        _stat_card("Reads kept", f"{kept:,}", sub=kept_sub),
-        _stat_card("Reads discarded", f"{discarded:,}", sub=disc_sub),
         _stat_card("Mean Phred", f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
                    sub="kept reads"),
         _stat_card("Insert length", f"{len(report.target):,} bp"),
