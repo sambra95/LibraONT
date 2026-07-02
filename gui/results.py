@@ -145,16 +145,24 @@ def _parameter_rows(report: Report) -> list[tuple[str, str]]:
     """Readable analysis parameters for the downloaded HTML report."""
     p = report.params
     tools = tool_versions(p.tool_paths)
+    if p.min_read_len is not None or p.max_read_len is not None:
+        lo = f"{p.min_read_len:,}" if p.min_read_len is not None else "0"
+        hi = f"{p.max_read_len:,}" if p.max_read_len is not None else "∞"
+        read_len_range = f"{lo}-{hi} bp"
+    else:
+        read_len_range = "No filtering"
     return [
         ("Input FASTQ", _fastq_download_name(report)),
         ("Insert Region", f"{p.start_pos}-{p.stop_pos} (length {len(report.target):,} bp)"),
         ("Plasmid reference", "Yes" if p.plasmid_seq else "No"),
+        ("Read length range", read_len_range),
         ("Read identity cutoff", f"{p.min_identity:.2f}"),
         ("Trim padding", f"{p.pad:,} bp"),
         ("Identified Variable Codons", ", ".join(map(str, report.valid_positions)) or "None"),
         ("Variable Codon Detection Threshold",
          f"< {p.auto_codon_match_pct:g}% match" if p.auto_codon_match_pct is not None else "Off"),
         ("Min pie-slice fraction", f"{p.pie_min_frac:.2f}"),
+        ("Include rare variants", "Yes" if p.include_rare_variants else "No"),
         ("MAFFT version", tools.get("mafft") or "-"),
         ("minimap2 version", tools.get("minimap2") or "-"),
         ("samtools version", tools.get("samtools") or "-"),
