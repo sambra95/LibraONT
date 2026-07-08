@@ -55,8 +55,11 @@ def _samtools_banner_version(path: str) -> str | None:
     stderr) when run with no arguments. Used as a fallback for those builds.
     """
     try:
+        # Decode as UTF-8 with replacement: hosts with a C/ASCII locale would
+        # otherwise raise UnicodeDecodeError on the non-ASCII bytes samtools
+        # prints (e.g. the copyright symbol in its banner).
         proc = subprocess.run([path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, timeout=20)
+                              encoding="utf-8", errors="replace", timeout=20)
     except Exception:
         return None
     text = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
@@ -84,10 +87,12 @@ def _tool_version(name: str, path: str | None) -> str | None:
     if not path:
         return None
     try:
-        # Generous timeout: on constrained hosts (e.g. Streamlit Cloud) a
-        # dynamically-linked tool like samtools can be slow to cold-start.
+        # Decode as UTF-8 with replacement so a host's C/ASCII locale can't
+        # raise UnicodeDecodeError on samtools' non-ASCII banner bytes. Generous
+        # timeout for slow cold-starts on constrained hosts (e.g. Streamlit Cloud).
         proc = subprocess.run([path, "--version"], stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True, timeout=20)
+                              stderr=subprocess.PIPE, encoding="utf-8",
+                              errors="replace", timeout=20)
     except subprocess.TimeoutExpired:
         return "found (version timed out)"
     except Exception as exc:  # on PATH but won't execute (e.g. missing shared lib)
@@ -221,7 +226,8 @@ def run_msa_mafft(seqs_named: list[tuple[str, str]], mafft_bin: str = "mafft", t
         cmd = [mafft_bin, "--thread", str(threads), "--addfragments", rfa_name,
                "--keeplength", "--anysymbol", "--op", str(op), "--ep", str(ep),
                *extra_args, backbone_fa]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              encoding="utf-8", errors="replace")
         os.unlink(rfa_name)
         if proc.returncode != 0 or not proc.stdout.strip():
             raise RuntimeError(f"MAFFT addfragments failed.\nCMD: {' '.join(cmd)}\n"
@@ -271,8 +277,10 @@ class CoverageResult:
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    # encoding/errors (not universal_newlines) so a C/ASCII-locale host can't
+    # raise UnicodeDecodeError on non-ASCII bytes in tool output.
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          universal_newlines=True, check=True, **kw)
+                          encoding="utf-8", errors="replace", check=True, **kw)
 
 
 # CIGAR operations by what they consume: reference span (a read's footprint on
