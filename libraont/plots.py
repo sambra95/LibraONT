@@ -21,6 +21,9 @@ from .constants import GENETIC_CODE
 
 _T = theme.TEMPLATE_NAME
 
+# Theme red, used to flag length-excluded reads and to mark the insert.
+_RED = "#C44E5A"
+
 _AA_NAMES: dict[str, str] = {
     "A": "Alanine",
     "R": "Arginine",
@@ -58,9 +61,17 @@ def read_length_figure(length_counts: Counter, min_read_len: int | None = None,
         bin_counts[(int(length) // 10) * 10] += count
     x, y = zip(*sorted(bin_counts.items()))
     labels = [f"{start}-{start + 9} bp" for start in x]
+    # Blue when the bin lies within the kept length window, red when it falls
+    # entirely outside it (those reads are dropped from every downstream plot).
+    bar_colors = [
+        _RED if ((min_read_len is not None and start + 9 < min_read_len)
+                 or (max_read_len is not None and start > max_read_len))
+        else theme.PALETTE["primary"]
+        for start in x
+    ]
     fig = go.Figure(go.Bar(
         x=x, y=y, customdata=labels, width=9,
-        marker_color=theme.PALETTE["primary"],
+        marker_color=bar_colors,
         hovertemplate="Length %{customdata}<br>%{y} reads<extra></extra>",
     ))
     for value, label in ((min_read_len, "min"), (max_read_len, "max")):
@@ -78,19 +89,15 @@ def read_length_figure(length_counts: Counter, min_read_len: int | None = None,
     return fig
 
 
-# Theme red used for the insert marker bar/label.
-_INSERT_RED = "#C44E5A"
-
-
 def _insert_marker(fig: go.Figure, start: float, end: float) -> None:
     """Mark the insert with a red bar (labelled "insert") in the margin just
     above the plot, spanning ``[start, end]`` on the x-axis."""
     fig.add_shape(type="rect", xref="x", yref="paper",
                   x0=start, x1=end, y0=1.02, y1=1.05,
-                  fillcolor=_INSERT_RED, line_width=0, layer="above")
+                  fillcolor=_RED, line_width=0, layer="above")
     fig.add_annotation(xref="x", yref="paper", x=(start + end) / 2, y=1.06,
                        text="insert", showarrow=False, yanchor="bottom",
-                       font=dict(size=11, color=_INSERT_RED))
+                       font=dict(size=11, color=_RED))
 
 
 def coverage_figure(cov: CoverageResult) -> go.Figure:
