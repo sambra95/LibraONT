@@ -92,7 +92,9 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         gene_seq = st.text_area("Gene sequence", height=120,
                                 help="Original gene (A/C/G/T/N, case-insensitive).")
         plasmid_seq = st.text_area("Plasmid sequence (optional)", height=80,
-                                   help="Full plasmid; enables the coverage plot.")
+                                   help="Full plasmid; enables the coverage plot. Must "
+                                        "include the target/gene sequence, which is located "
+                                        "within the plasmid to place it on the coverage plot.")
 
         gene_len = len(clean_sequence(gene_seq)) if gene_seq else 0
 
