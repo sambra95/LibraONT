@@ -47,6 +47,28 @@ def tool_status(overrides: dict[str, str] | None = None) -> dict[str, str | None
     return {name: resolve_tool(name, overrides.get(name)) for name in _ENV_VARS}
 
 
+def _samtools_banner_version(path: str) -> str | None:
+    """Parse the version from samtools' no-argument help banner.
+
+    Some samtools builds print nothing to ``--version`` but still show a
+    ``Version: 1.x (using htslib ...)`` line in the banner they print (to
+    stderr) when run with no arguments. Used as a fallback for those builds.
+    """
+    try:
+        proc = subprocess.run([path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, timeout=20)
+    except Exception:
+        return None
+    text = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
+    for line in text.splitlines():
+        line = line.strip()
+        if line.lower().startswith("version:"):
+            tokens = line.split(":", 1)[1].split()
+            if tokens:
+                return tokens[0]
+    return None
+
+
 @functools.lru_cache(maxsize=None)
 def _tool_version(name: str, path: str | None) -> str | None:
     """Return a concise version string for a resolved external tool.
@@ -54,25 +76,37 @@ def _tool_version(name: str, path: str | None) -> str | None:
     Cached by (name, resolved path): a binary's version is stable within a run,
     so this avoids re-spawning the tool on every Streamlit rerun - important on
     resource-constrained hosts where a cold start can be slow (see the timeout).
+
+    When a version can't be read it returns a short, *distinct* reason
+    (timeout / error / no output) rather than a single generic label, so a
+    genuine detection failure is visible and diagnosable from the UI.
     """
     if not path:
         return None
-    args = [path, "--version"]
     try:
         # Generous timeout: on constrained hosts (e.g. Streamlit Cloud) a
         # dynamically-linked tool like samtools can be slow to cold-start.
-        proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, timeout=20)
-    except Exception:
-        return "Detected"
-    output = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part.strip())
-    if not output:
-        return "Detected"
+        proc = subprocess.run([path, "--version"], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return "found (version timed out)"
+    except Exception as exc:  # on PATH but won't execute (e.g. missing shared lib)
+        return f"found ({type(exc).__name__})"
 
-    first = output.splitlines()[0].strip()
+    output = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part.strip())
+    if output:
+        first = output.splitlines()[0].strip()
+        if name == "samtools":
+            return first.removeprefix("samtools ").strip() or first
+        return first
+
+    # ``--version`` produced no output. samtools carries its version in the
+    # no-argument help banner, so try that before giving up.
     if name == "samtools":
-        return first.removeprefix("samtools ").strip() or first
-    return first
+        banner = _samtools_banner_version(path)
+        if banner:
+            return banner
+    return "found (no version output)"
 
 
 def tool_versions(overrides: dict[str, str] | None = None) -> dict[str, str | None]:
