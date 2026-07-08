@@ -22,7 +22,6 @@ def _cached_length_range(path: str, key: tuple) -> tuple[int, int] | None:
 
 _TOOL_LABELS = {"mafft": "MAFFT", "minimap2": "minimap2", "samtools": "samtools"}
 
-# One-line summary of what each external tool is used for in the pipeline.
 _TOOL_DESCRIPTIONS = {
     "mafft": "Reference-anchored multiple alignment of the reads - the backbone for "
              "base/AA composition, variable-codon detection and the variant treemap.",

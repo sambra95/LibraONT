@@ -47,71 +47,29 @@ def tool_status(overrides: dict[str, str] | None = None) -> dict[str, str | None
     return {name: resolve_tool(name, overrides.get(name)) for name in _ENV_VARS}
 
 
-def _samtools_banner_version(path: str) -> str | None:
-    """Parse the version from samtools' no-argument help banner.
-
-    Some samtools builds print nothing to ``--version`` but still show a
-    ``Version: 1.x (using htslib ...)`` line in the banner they print (to
-    stderr) when run with no arguments. Used as a fallback for those builds.
-    """
-    try:
-        # Decode as UTF-8 with replacement: hosts with a C/ASCII locale would
-        # otherwise raise UnicodeDecodeError on the non-ASCII bytes samtools
-        # prints (e.g. the copyright symbol in its banner).
-        proc = subprocess.run([path], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              encoding="utf-8", errors="replace", timeout=20)
-    except Exception:
-        return None
-    text = "\n".join(part for part in (proc.stdout, proc.stderr) if part)
-    for line in text.splitlines():
-        line = line.strip()
-        if line.lower().startswith("version:"):
-            tokens = line.split(":", 1)[1].split()
-            if tokens:
-                return tokens[0]
-    return None
-
-
 @functools.lru_cache(maxsize=None)
 def _tool_version(name: str, path: str | None) -> str | None:
-    """Return a concise version string for a resolved external tool.
+    """Concise version string for a resolved tool (None if unresolved).
 
-    Cached by (name, resolved path): a binary's version is stable within a run,
-    so this avoids re-spawning the tool on every Streamlit rerun - important on
-    resource-constrained hosts where a cold start can be slow (see the timeout).
-
-    When a version can't be read it returns a short, *distinct* reason
-    (timeout / error / no output) rather than a single generic label, so a
-    genuine detection failure is visible and diagnosable from the UI.
+    Cached by resolved path so the tool isn't re-run on every Streamlit rerun.
     """
     if not path:
         return None
     try:
-        # Decode as UTF-8 with replacement so a host's C/ASCII locale can't
-        # raise UnicodeDecodeError on samtools' non-ASCII banner bytes. Generous
-        # timeout for slow cold-starts on constrained hosts (e.g. Streamlit Cloud).
+        # utf-8/replace, not the locale default: a C/ASCII-locale host would
+        # raise UnicodeDecodeError on samtools' non-ASCII banner bytes.
         proc = subprocess.run([path, "--version"], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, encoding="utf-8",
                               errors="replace", timeout=20)
-    except subprocess.TimeoutExpired:
-        return "found (version timed out)"
-    except Exception as exc:  # on PATH but won't execute (e.g. missing shared lib)
-        return f"found ({type(exc).__name__})"
-
-    output = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part.strip())
-    if output:
-        first = output.splitlines()[0].strip()
-        if name == "samtools":
-            return first.removeprefix("samtools ").strip() or first
-        return first
-
-    # ``--version`` produced no output. samtools carries its version in the
-    # no-argument help banner, so try that before giving up.
+    except Exception:
+        return "detected"
+    output = "\n".join(p.strip() for p in (proc.stdout, proc.stderr) if p.strip())
+    if not output:
+        return "detected"
+    first = output.splitlines()[0].strip()
     if name == "samtools":
-        banner = _samtools_banner_version(path)
-        if banner:
-            return banner
-    return "found (no version output)"
+        return first.removeprefix("samtools ").strip() or first
+    return first
 
 
 def tool_versions(overrides: dict[str, str] | None = None) -> dict[str, str | None]:
@@ -277,8 +235,7 @@ class CoverageResult:
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
-    # encoding/errors (not universal_newlines) so a C/ASCII-locale host can't
-    # raise UnicodeDecodeError on non-ASCII bytes in tool output.
+    # utf-8/replace so a C/ASCII-locale host can't choke on non-ASCII output.
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           encoding="utf-8", errors="replace", check=True, **kw)
 
