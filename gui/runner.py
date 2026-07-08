@@ -30,7 +30,7 @@ def _tool_key(params: AnalysisParams) -> tuple:
 # ``key`` (hashed) carries everything the result depends on; ``_params`` is passed
 # through but ignored by Streamlit's cache hasher. No progress callback here - the
 # function must not touch Streamlit elements (see module docstring).
-@st.cache_data(show_spinner="Orienting reads + MAFFT alignment…", max_entries=4)
+@st.cache_data(show_spinner="Creating alignment…", max_entries=4)
 def _cached_msa(key: tuple, _params: AnalysisParams) -> MsaResult:
     return pipeline.compute_msa(_params)
 

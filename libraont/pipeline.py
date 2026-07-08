@@ -97,7 +97,7 @@ def compute_msa(params: AnalysisParams, tools: Optional[dict] = None,
     target = extract_target(params.gene_seq, params.start_pos, params.stop_pos)
     length_counts = read_length_counts(params.fastq_path)
 
-    step(0.15, "Orienting and trimming reads (edlib)…")
+    step(0.15, "Orienting and trimming reads…")
     seqs_named, mean_phred = alignment.edlib_orient_trim_and_quality(
         params.fastq_path, target, min_identity=params.min_identity,
         pad=params.pad, min_read_len=params.min_read_len,
