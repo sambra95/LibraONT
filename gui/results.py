@@ -225,14 +225,6 @@ def _tables(report: Report) -> None:
             tabs[4].info("No haplotypes (provide codon positions).")
 
 
-def _report_key(report: Report) -> tuple:
-    """Stable signature of the analysis that produced ``report`` (drives caching)."""
-    p = report.params
-    return (p.fastq_path, p.fastq_name, p.gene_seq, p.start_pos, p.stop_pos, p.min_identity, p.pad,
-            p.plasmid_seq, tuple(p.pie_positions), p.pie_min_frac, p.auto_codon_match_pct,
-            tuple(sorted(p.tool_paths.items())))
-
-
 def _fastq_download_name(report: Report) -> str:
     """Original FASTQ filename for downloads, falling back to the readable path."""
     name = report.params.fastq_name or os.path.basename(report.params.fastq_path)
@@ -402,27 +394,23 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
 </html>"""
 
 
-# ``key`` (hashed) identifies the report; ``_report``/``_figs`` pass through but
-# are ignored by the cache hasher. So each artifact is built once per analysis and
-# kept in the cache ready to download.
-@st.cache_data(show_spinner="Generating HTML report…", max_entries=4)
-def _build_html(key: tuple, _report: Report,
-                _figs: list[tuple[str, object]]) -> tuple[str, bytes]:
-    return (f"ANALYSIS_{_fastq_download_name(_report)}.html",
-            _html_report(_report, _figs).encode("utf-8"))
+def _build_html(report: Report,
+                figs: list[tuple[str, object]]) -> tuple[str, bytes]:
+    """Render the results section to a standalone HTML file (name, bytes)."""
+    return (f"ANALYSIS_{_fastq_download_name(report)}.html",
+            _html_report(report, figs).encode("utf-8"))
 
 
-@st.cache_data(show_spinner="Zipping data tables…", max_entries=4)
-def _build_tables_zip(key: tuple, _report: Report) -> bytes:
-    """Bundle the tabulated datasets (one CSV per table) into a zip (cached)."""
+def _build_tables_zip(report: Report) -> bytes:
+    """Bundle the tabulated datasets (one CSV per table) into a zip."""
     tables = {
-        "base_counts.csv": _report.df_counts.to_csv(),
-        "base_frequencies.csv": _report.df_freq.round(6).to_csv(),
-        "aa_counts.csv": _report.df_aa_counts.to_csv(),
-        "aa_frequencies.csv": _report.df_aa_freq.round(6).to_csv(),
+        "base_counts.csv": report.df_counts.to_csv(),
+        "base_frequencies.csv": report.df_freq.round(6).to_csv(),
+        "aa_counts.csv": report.df_aa_counts.to_csv(),
+        "aa_frequencies.csv": report.df_aa_freq.round(6).to_csv(),
     }
-    if _report.hap_df is not None and not _report.hap_df.empty:
-        tables["haplotypes.csv"] = _report.hap_df[["combo_label", "count"]].to_csv(index=False)
+    if report.hap_df is not None and not report.hap_df.empty:
+        tables["haplotypes.csv"] = report.hap_df[["combo_label", "count"]].to_csv(index=False)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -432,7 +420,7 @@ def _build_tables_zip(key: tuple, _report: Report) -> bytes:
 
 
 def _downloads(report: Report, figs: list[tuple[str, object]]) -> None:
-    """Auto-generate (cached) the HTML report and data-table ZIP; offer both downloads."""
+    """Generate the HTML report and data-table ZIP fresh, and offer both downloads."""
     st.subheader("Downloads")
     st.caption("Download a static HTML report for sharing, or export the underlying data tables "
                "as CSV files in a ZIP archive.")
@@ -441,7 +429,7 @@ def _downloads(report: Report, figs: list[tuple[str, object]]) -> None:
 
     with col_html:
         try:
-            fname, data = _build_html(_report_key(report), report, figs)
+            fname, data = _build_html(report, figs)
             st.download_button("⬇ Download HTML report", data, file_name=fname,
                                mime="text/html", type="primary", width="stretch")
         except Exception as exc:
@@ -449,7 +437,7 @@ def _downloads(report: Report, figs: list[tuple[str, object]]) -> None:
 
     with col_zip:
         st.download_button("⬇ Download data tables (ZIP)",
-                           _build_tables_zip(_report_key(report), report),
+                           _build_tables_zip(report),
                            file_name=f"{stem}_tables.zip", mime="application/zip",
                            type="primary", width="stretch")
 
