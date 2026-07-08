@@ -147,13 +147,13 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                  "the analysis (AA distribution and variant treemap too). Lower it if too "
                  "few reads pass.")
         auto_detect = st.toggle(
-            "Auto-detect variable codons", value=False,
+            "Auto-detect variable codons", value=True,
             help="Use reference-match % to select codons automatically.")
         positions_text = ""
         auto_pct = None
         if auto_detect:
             auto_pct = st.slider(
-                "Minimum identity (%)", 0.0, 100.0, 90.0, 1.0,
+                "Minimum identity (%)", 0.0, 100.0, 70.0, 1.0,
                 help="Codons with a position below this reference-match % are added "
                      "automatically, exactly as if typed into 'Codon positions'. "
                      "Shown as a cutoff line on the gap/match plot.")
@@ -167,7 +167,7 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                                             "this frequency are folded into a single "
                                             "'Other' slice.")
         include_rare_variants = st.toggle(
-            "Include rare variants", value=True,
+            "Include rare variants", value=False,
             help="Variant treemap only: when off, variants containing an amino acid below the "
                  "grouping threshold at its codon position (an 'Other' residue) are excluded, "
                  "and the treemap stats reflect the remaining variants.")
