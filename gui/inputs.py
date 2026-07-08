@@ -22,6 +22,15 @@ def _cached_length_range(path: str, key: tuple) -> tuple[int, int] | None:
 
 _TOOL_LABELS = {"mafft": "MAFFT", "minimap2": "minimap2", "samtools": "samtools"}
 
+# One-line summary of what each external tool is used for in the pipeline.
+_TOOL_DESCRIPTIONS = {
+    "mafft": "Reference-anchored multiple alignment of the reads - the backbone for "
+             "base/AA composition, variable-codon detection and the variant treemap.",
+    "minimap2": "Maps reads to the whole plasmid (ONT preset) for the coverage plot.",
+    "samtools": "Sorts and indexes the minimap2 alignments and computes per-base depth "
+                "for the coverage plot.",
+}
+
 
 def _resolve_fastq() -> tuple[str | None, str | None]:
     """Return a readable path and original filename for the single uploaded FASTQ.
@@ -75,6 +84,7 @@ def _tool_paths() -> dict[str, str]:
             version = versions.get(name)
             st.markdown(f"{'✅' if found else '⚠️'} **{label}** - "
                         + (f"`{version}`" if version else "not found"))
+            st.caption(_TOOL_DESCRIPTIONS[name])
             val = st.text_input(f"{label} path", key=f"tool_{name}", value=found or "",
                                 help=f"Path to the {label} binary. Pre-filled with the "
                                      "detected default; change it to use another build.")
