@@ -1,0 +1,20 @@
+name: libraont
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  # External bioinformatics tools (same binaries installed on Streamlit Cloud
+  # via packages.txt). conda puts these on PATH so the app resolves them
+  # automatically - no path editing needed in the sidebar.
+  - mafft
+  - minimap2
+  - samtools
+  - pip
+  - pip:
+      - streamlit>=1.33
+      - plotly>=5.20
+      - pandas>=2.0
+      - numpy>=1.24
+      - edlib>=1.3.9
+      - kaleido==0.2.1

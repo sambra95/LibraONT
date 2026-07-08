@@ -1,102 +1,78 @@
 # LibraONT
 
-LibraONT is a Streamlit app for nanopore mutagenesis-library analysis. It orients and trims ONT reads against a reference insert, builds a reference-anchored multiple sequence alignment, summarizes nucleotide and amino-acid variation, and reports variant diversity across selected or automatically detected codons.
+LibraONT is a Streamlit app for nanopore mutagenesis-library analysis. It orients and
+trims ONT reads against a reference insert, builds a reference-anchored multiple sequence
+alignment, and summarises nucleotide, amino-acid and variant diversity across selected or
+automatically detected codons.
 
-## What It Does
+## What it does
 
-- Upload a FASTQ/FASTQ.GZ read file.
-- Provide a gene sequence and optionally a full plasmid sequence.
-- Align reads to the insert with `edlib` and MAFFT.
-- Optionally compute plasmid-wide coverage with minimap2 and samtools.
-- Plot read-length distribution, insert/plasmid coverage, gap and reference-match percentages, amino-acid distributions, and haplotype treemaps.
-- Detect variable codons from a reference-match threshold.
-- Export an HTML report with static plots, analysis parameters, reference sequences, and downloadable CSV tables.
-
-## Requirements
-
-- Python 3.10 or newer
-- Python dependencies from `pyproject.toml`
-- MAFFT for read alignment
-- Optional: minimap2 and samtools for plasmid coverage plots
-
-The app can run without minimap2/samtools, but the plasmid coverage plot is skipped unless both are available.
-
-## Install
-
-Clone the repository:
-
-```bash
-git clone https://github.com/<your-username>/LibraONT.git
-cd LibraONT
-```
-
-Sync the environment with `uv`:
-
-```bash
-uv sync
-```
-
-## External Tools
-
-Install MAFFT:
-
-```bash
-brew install mafft
-```
-
-Optional coverage tools:
-
-```bash
-brew install minimap2 samtools
-```
-
-If the app does not find a tool automatically, expand **External tools** in the sidebar, enter the binary path, and press enter. A green tick means the tool has been identified. The app reports detected tool versions in the sidebar and downloaded report.
-
-## Run Locally
-
-Run `uv sync` before starting the app so the local environment matches the locked dependencies:
-
-```bash
-uv sync
-```
-
-```bash
-uv run streamlit run app.py
-```
-
-The app opens in your browser, usually at:
-
-```text
-http://localhost:8501
-```
+1. Orient and trim each read to the reference insert (`edlib`) and filter by identity and length.
+2. Build a reference-anchored multiple sequence alignment (MAFFT).
+3. Tabulate per-position base and amino-acid composition.
+4. Report variant diversity (haplotypes) across the chosen codons.
+5. Optionally compute whole-plasmid coverage (minimap2 + samtools).
 
 ## Inputs
 
-- **FASTQ file**: nanopore reads in `.fastq`, `.fq`, or gzipped FASTQ format.
-- **Gene sequence**: reference gene/insert sequence.
-- **Plasmid sequence**: optional full plasmid sequence for coverage analysis.
-- **Insert region**: use the full gene or choose start/stop positions.
-- **Minimum identity**: read/reference identity cutoff for keeping reads.
-- **Padding**: extra bases retained around the matched insert when trimming reads.
-- **Codon positions or auto-detection**: manually specify codons, or detect variable codons using a reference-match threshold.
-- **Grouping threshold**: amino-acid pie slices below this frequency are grouped into `Other`.
+- **FASTQ file** — nanopore reads (`.fastq`, `.fq`, or gzipped).
+- **Gene sequence** — the reference gene/insert (A/C/G/T/N, case-insensitive).
+- **Plasmid sequence** *(optional)* — full plasmid; enables the coverage plot.
+- **Insert region** — the full gene, or a start/stop sub-region.
+- **Minimum identity** — read-to-insert identity cutoff for keeping reads.
+- **Read length range / padding** — length window for reads, and bases kept either side when trimming.
+- **Codon positions** — typed manually, or auto-detected from a reference-match threshold.
+- **Grouping threshold / rare variants** — fold low-frequency amino acids into `Other` and include or exclude rare variants in the treemap.
 
 ## Outputs
 
-The app displays:
+Displayed in the app:
 
-- Read length distribution
-- Plasmid coverage fraction, when plasmid coverage tools are available
+- Read-length distribution
+- Plasmid coverage fraction (when a plasmid and the coverage tools are available)
 - Gap and reference-match percentage across the insert
-- Amino-acid distributions at identified codons
-- Variant treemap across identified codons
-- Base, amino-acid, and haplotype data tables
+- Amino-acid distributions at the identified codons
+- Variant treemap across the identified codons
+- Base, amino-acid and haplotype data tables
 
 Downloads:
 
-- Static HTML report named `ANALYSIS_<FASTQ file name>.html`
-- ZIP archive of CSV data tables
+- Static HTML report, `ANALYSIS_<FASTQ file name>.html`
+- ZIP archive of the CSV data tables
+
+## Install
+
+Requires [conda or mamba](https://github.com/conda-forge/miniforge). The environment file
+bundles Python, the app's Python dependencies, and the external tools (MAFFT, minimap2,
+samtools) — no separate installs needed.
+
+```bash
+git clone https://github.com/sambra95/LibraONT.git
+cd LibraONT
+conda env create -f environment.yml   # or: mamba env create -f environment.yml
+conda activate libraont
+```
+
+The tools are found automatically once the environment is active. To use a different build,
+expand **External tools** in the sidebar and enter its path (a green tick confirms detection).
+
+## Run
+
+```bash
+streamlit run app.py
+```
+
+The app opens in your browser, usually at <http://localhost:8501>.
+
+## Deploy to Streamlit Cloud
+
+The repo is deployment-ready: [`requirements.txt`](requirements.txt) provides the Python
+dependencies and [`packages.txt`](packages.txt) installs MAFFT, minimap2 and samtools on the
+Cloud image. Point a new app at `app.py` and select Python 3.12 in the advanced settings.
 
 ## Notes
 
-Variant combinations and amino-acid Hamming distances in the treemap are calculated only across the identified variable codons. The reference-matching variant is outlined in black.
+Variant combinations and amino-acid Hamming distances in the treemap are calculated only
+across the identified variable codons. The reference-matching variant is outlined in black.
+The coverage plot is skipped unless a plasmid sequence is provided and both minimap2 and
+samtools are available.

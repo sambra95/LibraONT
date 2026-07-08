@@ -29,24 +29,11 @@ from .sequences import (filter_fastq_by_length, read_fastq_records, revcomp,
 # Map a logical tool name to the env var that can override its path.
 _ENV_VARS = {"mafft": "MAFFT_BIN", "minimap2": "MINIMAP2_BIN", "samtools": "SAMTOOLS_BIN"}
 
-# Local default install locations (this Mac). Used only as a fallback when the
-# tool isn't supplied explicitly, via a *_BIN env var, or found on PATH - so the
-# app works out of the box here even when a tool isn't on the launching PATH
-# (e.g. minimap2 lives in a conda env). Override any of these from the sidebar's
-# "External tools" panel, or point a *_BIN env var elsewhere.
-DEFAULT_TOOL_PATHS = {
-    "mafft": "/opt/homebrew/bin/mafft",
-    "minimap2": "/Users/sambra/miniforge3/envs/speedygenes_env/bin/minimap2",
-    "samtools": "/Users/sambra/miniforge3/bin/samtools",
-}
-
 
 def resolve_tool(name: str, override: str | None = None) -> str | None:
-    """Resolve a binary: explicit ``override`` -> ``<NAME>_BIN`` env -> local
-    default path -> ``PATH``."""
+    """Resolve a binary: explicit ``override`` -> ``<NAME>_BIN`` env -> ``PATH``."""
     for candidate in (override,
                       os.environ.get(_ENV_VARS.get(name, ""), None),
-                      DEFAULT_TOOL_PATHS.get(name),
                       name):
         if candidate and shutil.which(candidate):
             return shutil.which(candidate)
