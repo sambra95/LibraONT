@@ -1,0 +1,3 @@
+mafft
+minimap2
+samtools
