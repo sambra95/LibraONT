@@ -12,6 +12,7 @@ tool is missing rather than crashing.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shutil
@@ -46,14 +47,22 @@ def tool_status(overrides: dict[str, str] | None = None) -> dict[str, str | None
     return {name: resolve_tool(name, overrides.get(name)) for name in _ENV_VARS}
 
 
+@functools.lru_cache(maxsize=None)
 def _tool_version(name: str, path: str | None) -> str | None:
-    """Return a concise version string for a resolved external tool."""
+    """Return a concise version string for a resolved external tool.
+
+    Cached by (name, resolved path): a binary's version is stable within a run,
+    so this avoids re-spawning the tool on every Streamlit rerun - important on
+    resource-constrained hosts where a cold start can be slow (see the timeout).
+    """
     if not path:
         return None
     args = [path, "--version"]
     try:
+        # Generous timeout: on constrained hosts (e.g. Streamlit Cloud) a
+        # dynamically-linked tool like samtools can be slow to cold-start.
         proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, timeout=5)
+                              text=True, timeout=20)
     except Exception:
         return "Detected"
     output = "\n".join(part.strip() for part in (proc.stdout, proc.stderr) if part.strip())
