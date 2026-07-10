@@ -461,6 +461,7 @@ def render(report: Report) -> None:
         st.plotly_chart(
             go.Figure(fig).update_layout(title_text=""),
             use_container_width=True,
+            config={"toImageButtonOptions": {"format": "svg"}},
         )
 
     _tables(report)
