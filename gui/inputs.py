@@ -157,6 +157,8 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                  "'Alignment to reference insert' plot, and it sets the reads used across "
                  "the analysis (AA distribution and variant treemap too). Lower it if too "
                  "few reads pass.")
+        st.caption("Read-level filter: fraction of each read that must match the "
+                   "reference insert for the read to be kept.")
         auto_detect = st.toggle(
             "Auto-detect variable codons", value=True,
             help="Use reference-match % to select codons automatically.")
@@ -168,6 +170,8 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                 help="Codons with a position below this reference-match % are added "
                      "automatically, exactly as if typed into 'Codon positions'. "
                      "Shown as a cutoff line on the gap/match plot.")
+            st.caption("Codon-level cutoff: codons matching the reference less "
+                       "often than this are treated as variable.")
         else:
             positions_text = st.text_input(
                 "Codon positions", placeholder="e.g. 16, 129, 231",
