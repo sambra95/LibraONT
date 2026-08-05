@@ -15,6 +15,7 @@ from libraont import plots, theme
 from libraont.alignment import tool_versions
 from libraont.analysis import haplotype_gini
 from libraont.pipeline import Report
+from libraont.sequences import clean_sequence
 
 
 def _build_figures(report: Report) -> list[tuple[str, object]]:
@@ -22,7 +23,8 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
     p = report.params
     figs: list[tuple[str, object]] = [
         ("Read lengths", plots.read_length_figure(
-            report.length_counts, p.min_read_len, p.max_read_len)),
+            report.length_counts, p.min_read_len, p.max_read_len,
+            plasmid_len=len(clean_sequence(p.plasmid_seq)) if p.plasmid_seq else None)),
     ]
     if report.coverage is not None:
         figs.append(("Read alignment map", plots.read_alignment_figure(report.coverage)))

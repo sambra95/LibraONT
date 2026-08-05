@@ -50,10 +50,12 @@ _AA_NAMES: dict[str, str] = {
 
 
 def read_length_figure(length_counts: Counter, min_read_len: int | None = None,
-                       max_read_len: int | None = None) -> go.Figure:
+                       max_read_len: int | None = None,
+                       plasmid_len: int | None = None) -> go.Figure:
     """Bar chart of read-length frequencies binned every 10 bp. This plot always
     covers *all* reads; dashed lines mark the min/max read-length cutoffs that
-    filter reads out of every other plot."""
+    filter reads out of every other plot, plus the plasmid length when one was
+    given - whole-plasmid reads pile up there."""
     if not length_counts:
         return _empty("No reads found")
     bin_counts: Counter = Counter()
@@ -79,12 +81,26 @@ def read_length_figure(length_counts: Counter, min_read_len: int | None = None,
             fig.add_vline(x=value, line=dict(color=theme.PALETTE["muted"], width=1, dash="dash"),
                           annotation_text=label, annotation_position="top",
                           annotation=dict(font=dict(size=11, color=theme.PALETTE["muted"])))
+    if plasmid_len:
+        # Labelled in the margin above the plot: the max cutoff usually sits close
+        # by, and "top" would put the two annotations on top of each other.
+        accent = theme.PALETTE["accent"]
+        fig.add_vline(x=plasmid_len, line=dict(color=accent, width=1.4, dash="dash"))
+        fig.add_annotation(xref="x", yref="paper", x=plasmid_len, y=1.02, yanchor="bottom",
+                           # Kept inside the plot when the line is its right-hand edge.
+                           xanchor="right" if plasmid_len >= x[-1] else "center",
+                           text=f"plasmid ({plasmid_len:,} bp)", showarrow=False,
+                           font=dict(size=11, color=accent))
+    description = ("Shows how many reads fall into each 10 bp length bin (all reads). "
+                   "Dashed lines mark the min/max read-length cutoffs; reads outside "
+                   "them are excluded from every other plot and the analysis.")
+    if plasmid_len:
+        description += (" The coral line marks the plasmid length: whole-plasmid reads "
+                        "pile up around it, amplicon reads well below it.")
     fig.update_layout(
         template=_T, title="Read length distribution",
         xaxis_title="Read length bin (bp)", yaxis_title="Count", bargap=0.05,
-        meta={"description": "Shows how many reads fall into each 10 bp length bin (all reads). "
-                             "Dashed lines mark the min/max read-length cutoffs; reads outside "
-                             "them are excluded from every other plot and the analysis."},
+        meta={"description": description},
     )
     return fig
 
