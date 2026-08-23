@@ -70,26 +70,17 @@ def _parse_positions(text: str) -> list[int]:
     return out
 
 
-def _tool_paths() -> dict[str, str]:
-    """Optional binary-path overrides; shows detected status for each tool."""
-    overrides: dict[str, str] = {}
+def _tool_status() -> None:
+    """Read-only detection status for the external tools (found on PATH or not)."""
     with st.expander("External tools", expanded=False):
-        st.caption("External tools. Update the paths and press enter to change these. "
-                   "Green tick means the tool has been identified")
-        status = alignment.tool_status()
+        st.caption("Detected on PATH by the active environment. A missing tool means "
+                   "the `libraont` conda environment is not active.")
         versions = alignment.tool_versions()
         for name, label in _TOOL_LABELS.items():
-            found = status[name]
             version = versions.get(name)
-            st.markdown(f"{'✅' if found else '⚠️'} **{label}** - "
+            st.markdown(f"{'✅' if version else '⚠️'} **{label}** - "
                         + (f"`{version}`" if version else "not found"))
             st.caption(_TOOL_DESCRIPTIONS[name])
-            val = st.text_input(f"{label} path", key=f"tool_{name}", value=found or "",
-                                help=f"Path to the {label} binary. Pre-filled with the "
-                                     "detected default; change it to use another build.")
-            if val.strip():
-                overrides[name] = val.strip()
-    return overrides
 
 
 def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
@@ -187,7 +178,7 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                  "grouping threshold at its codon position (an 'Other' residue) are excluded, "
                  "and the treemap stats reflect the remaining variants.")
 
-        tool_paths = _tool_paths()
+        _tool_status()
         run = st.button("Run analysis", type="primary", use_container_width=True)
 
     # Validation.
@@ -210,6 +201,5 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         plasmid_seq=plasmid_seq.strip() or None,
         pie_positions=positions, pie_min_frac=float(pie_min_frac),
         include_rare_variants=bool(include_rare_variants),
-        auto_codon_match_pct=float(auto_pct) if auto_pct is not None else None,
-        tool_paths=tool_paths)
+        auto_codon_match_pct=float(auto_pct) if auto_pct is not None else None)
     return params, run, None

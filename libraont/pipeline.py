@@ -45,7 +45,6 @@ class AnalysisParams:
     # When set, codons with a position below this reference-match % are auto-added
     # to ``pie_positions`` (variable-codon detection). ``None`` disables it.
     auto_codon_match_pct: Optional[float] = None
-    tool_paths: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -91,7 +90,7 @@ def compute_msa(params: AnalysisParams, tools: Optional[dict] = None,
     parameters that affect it (see ``gui.runner``).
     """
     step = _stepper(progress)
-    tools = tools if tools is not None else alignment.tool_status(params.tool_paths)
+    tools = tools if tools is not None else alignment.tool_status()
 
     step(0.05, "Parsing reference and reading FASTQ…")
     target = extract_target(params.gene_seq, params.start_pos, params.stop_pos)
@@ -126,7 +125,7 @@ def compute_coverage(params: AnalysisParams, target: str, tools: Optional[dict] 
     """
     if not params.plasmid_seq:
         return None
-    tools = tools if tools is not None else alignment.tool_status(params.tool_paths)
+    tools = tools if tools is not None else alignment.tool_status()
     if not (tools.get("minimap2") and tools.get("samtools")):
         return None
     _stepper(progress)(0.92, "Computing coverage (minimap2 + samtools)…")

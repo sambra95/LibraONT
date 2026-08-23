@@ -146,7 +146,7 @@ def _summary(report: Report) -> None:
 def _parameter_rows(report: Report) -> list[tuple[str, str]]:
     """Readable analysis parameters for the downloaded HTML report."""
     p = report.params
-    tools = tool_versions(p.tool_paths)
+    tools = tool_versions()
     if p.min_read_len is not None or p.max_read_len is not None:
         lo = f"{p.min_read_len:,}" if p.min_read_len is not None else "0"
         hi = f"{p.max_read_len:,}" if p.max_read_len is not None else "∞"
@@ -245,8 +245,8 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
     warning = ""
     if report.params.plasmid_seq and report.coverage is None:
         warning = (
-            "<div class='warning'>Coverage plot skipped - minimap2 and samtools must be "
-            "available (set their paths under <em>External tools</em>).</div>")
+            "<div class='warning'>Coverage plot skipped - minimap2 and samtools were "
+            "not found on PATH.</div>")
 
     sections = []
     for label, fig in figs:
@@ -449,8 +449,8 @@ def render(report: Report) -> None:
     _summary(report)
 
     if report.params.plasmid_seq and report.coverage is None:
-        st.warning("Coverage plot skipped - minimap2 and samtools must be available "
-                   "(set their paths under *External tools*).")
+        st.warning("Coverage plot skipped - minimap2 and samtools were not found on "
+                   "PATH (activate the `libraont` conda environment).")
 
     figs = _build_figures(report)
     for label, fig in figs:

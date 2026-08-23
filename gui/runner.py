@@ -22,11 +22,6 @@ from libraont import pipeline
 from libraont.pipeline import AnalysisParams, MsaResult, Report
 
 
-def _tool_key(params: AnalysisParams) -> tuple:
-    """Hashable view of the tool-path overrides (which binary actually runs)."""
-    return tuple(sorted(params.tool_paths.items()))
-
-
 # ``key`` (hashed) carries everything the result depends on; ``_params`` is passed
 # through but ignored by Streamlit's cache hasher. No progress callback here - the
 # function must not touch Streamlit elements (see module docstring).
@@ -43,8 +38,7 @@ def run_analysis(params: AnalysisParams, progress=None) -> Report:
 
     step(0.10, "Aligning reads")
     msa_key = (params.fastq_path, params.gene_seq, params.start_pos, params.stop_pos,
-               params.min_identity, params.pad, params.min_read_len, params.max_read_len,
-               _tool_key(params))
+               params.min_identity, params.pad, params.min_read_len, params.max_read_len)
     msa = _cached_msa(msa_key, params)
 
     # Everything past the alignment is uncached, so it always re-runs and may drive

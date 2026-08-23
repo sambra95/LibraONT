@@ -218,6 +218,28 @@ def read_alignment_figure(cov: CoverageResult) -> go.Figure:
     return fig
 
 
+def _aa_track(ref_seq: str, length: int, frame_offset: int) -> go.Bar | None:
+    """Reference amino acid of each codon as a coloured band for ``yaxis2``,
+    using the shared group colours (``theme.AA_COLORS``). Letters are drawn
+    inside each block whenever they fit."""
+    ref_up = (ref_seq or "").upper()
+    centres, letters, colors = [], [], []
+    for start in range(frame_offset, length - 2, 3):
+        aa = GENETIC_CODE.get(ref_up[start:start + 3]) or "?"
+        centres.append(start + 2)  # 1-based centre of the three nucleotides
+        letters.append(aa)
+        colors.append(theme.AA_COLORS.get(aa, theme.PALETTE["muted"]))
+    if not centres:
+        return None
+    return go.Bar(x=centres, y=[1] * len(centres), width=3, yaxis="y2",
+                  marker=dict(color=colors, line=dict(width=0)),
+                  text=letters, textposition="inside", insidetextanchor="middle",
+                  textangle=0,  # never let Plotly rotate letters in narrow blocks
+                  textfont=dict(family="monospace", size=11,
+                                color=[theme.contrast_text(c) for c in colors]),
+                  showlegend=False, hoverinfo="skip")
+
+
 def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "-",
                      shade_codons=None, frame_offset: int = 0,
                      min_identity: float | None = None,
@@ -228,6 +250,9 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
     """Per-position gap % (counts['-'] / row total) and reference-match %
     (gaps excluded from the denominator), optionally shading full codons and
     showing the auto-detect reference-match cutoff.
+
+    A band above the plot shows the reference amino acid of each codon, coloured
+    by biochemical group like every other amino-acid view in the app.
 
     When ``aa_counts`` (per-codon amino-acid counts, 1-based codon index) is
     given, the hover for each position also lists the 20 amino acids in two
@@ -267,6 +292,10 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
                                  line=dict(color="rgba(0,0,0,0)"), showlegend=False,
                                  customdata=aa_blocks,
                                  hovertemplate="%{customdata}<extra></extra>"))
+
+    aa_track = _aa_track(ref_seq, L, frame_offset)
+    if aa_track is not None:
+        fig.add_trace(aa_track)
 
     if auto_match_threshold is not None:
         fig.add_trace(go.Scatter(
@@ -313,14 +342,20 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
         template=_T, hovermode="x unified",
         title="Alignment to reference insert",
         xaxis_title="Position in reference (1-based, nucleotides)",
-        yaxis_title="Percentage (%)",
+        yaxis=dict(title="Percentage (%)", domain=[0, 0.90] if aa_track else [0, 1]),
+        yaxis2=dict(domain=[0.94, 1.0], range=[0, 1], fixedrange=True,
+                    showgrid=False, zeroline=False, showticklabels=False, ticks=""),
+        # Letters shrink to fit their codon block and drop out only once they
+        # would be unreadable; zooming in brings them back.
+        uniformtext=dict(minsize=5, mode="hide"),
         margin=dict(t=90),
         hoverlabel=dict(font=dict(family="monospace", size=12)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         meta={
             "description": "Compares gap frequency with reference-match frequency at each "
                            "insert base. Low reference-match positions indicate likely "
-                           "variable or mutated sites.",
+                           "variable or mutated sites. The band above the plot gives the "
+                           "reference amino acid at each codon, coloured by biochemical group.",
             "metric_cards": cards,
         },
     )
@@ -520,8 +555,9 @@ _AA_BY_GROUP = [aa for group in _GROUP_ORDER
 def _aa_freq_block(counts_row: pd.Series, ref_aa: str | None = None) -> str:
     """Two-column list of the 20 amino acids with their relative frequency (%)
     at one codon. Each cell is coloured by biochemical group (see
-    ``theme.AA_COLORS``) and the reference amino acid's cell is bold. Relies on a
-    monospace hover font for column alignment."""
+    ``theme.AA_COLORS``); observed residues (and the reference) are bold, and
+    cells reading 0.0% are faded. Relies on a monospace hover font for column
+    alignment."""
     total = float(counts_row.sum())
     half = len(_AA_BY_GROUP) // 2
 
@@ -529,9 +565,11 @@ def _aa_freq_block(counts_row: pd.Series, ref_aa: str | None = None) -> str:
         count = float(counts_row.get(aa, 0.0))
         pct = 100.0 * count / total if total > 0 else 0.0
         text = f"{aa} {pct:5.1f}%"
-        if aa == ref_aa:
+        if count > 0 or aa == ref_aa:
             text = f"<b>{text}</b>"
         color = theme.AA_COLORS.get(aa, theme.PALETTE["muted"])
+        if round(pct, 1) == 0.0:  # displays as 0% – stay group-coloured but recede
+            color = theme.fade(color)
         return f"<span style='color:{color}'>{text}</span>"
 
     rows = [f"{cell(_AA_BY_GROUP[i])}   {cell(_AA_BY_GROUP[i + half])}"

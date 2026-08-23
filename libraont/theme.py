@@ -89,6 +89,25 @@ def activate() -> None:
     pio.templates.default = TEMPLATE_NAME
 
 
+#: pale tint of ``PALETTE["secondary"]``; the blend target for faded text
+FADE_GREY = "#B6C2CA"
+
+
+def fade(color: str, amount: float = 0.75, toward: str | None = None) -> str:
+    """Blend a hex colour toward :data:`FADE_GREY` (0 = unchanged, 1 = fully
+    grey): lighter and desaturated, but still recognisably its original hue."""
+    target = toward or FADE_GREY
+    mix = lambda i: round(int(color[i:i + 2], 16)
+                          + (int(target[i:i + 2], 16) - int(color[i:i + 2], 16)) * amount)
+    return "#%02X%02X%02X" % (mix(1), mix(3), mix(5))
+
+
+def contrast_text(color: str) -> str:
+    """Light or dark text, whichever reads better on ``color``."""
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return PALETTE["text"] if 0.299 * r + 0.587 * g + 0.114 * b > 150 else "#FFFFFF"
+
+
 def aa_color_sequence(labels: list[str]) -> list[str]:
     """Colours for amino-acid labels; 'Other'/'(no data)' get a neutral grey."""
     return [AA_COLORS.get(lbl, PALETTE["muted"]) for lbl in labels]
@@ -100,5 +119,5 @@ activate()
 __all__ = [
     "PALETTE", "CATEGORICAL", "GAP_COLOR", "MATCH_COLOR",
     "AA_GROUPS", "AA_GROUP_COLORS", "AA_COLORS", "TEMPLATE_NAME", "activate",
-    "aa_color_sequence", "AA_ORDER",
+    "aa_color_sequence", "fade", "FADE_GREY", "contrast_text", "AA_ORDER",
 ]

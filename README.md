@@ -53,8 +53,8 @@ conda env create -f environment.yml   # or: mamba env create -f environment.yml
 conda activate libraont
 ```
 
-The tools are found automatically once the environment is active. To use a different build,
-expand **External tools** in the sidebar and enter its path (a green tick confirms detection).
+The app looks for MAFFT, minimap2 and samtools on `PATH`, so the environment must be active
+when you launch it. **External tools** in the sidebar confirms detection (a green tick per tool).
 
 ## Run
 

@@ -5,8 +5,9 @@ This module wraps the external tools:
   * ``mafft`` for the reference-anchored multiple alignment,
   * ``minimap2`` + ``samtools`` for whole-plasmid coverage.
 
-External binaries are resolved via :func:`resolve_tool` (explicit path, then the
-matching ``*_BIN`` env var, then ``PATH``) so the app degrades gracefully when a
+External binaries are looked up on ``PATH`` only (:func:`tool_status`) - the
+conda environment in ``environment.yml`` puts them there, exactly as
+``packages.txt`` does on Streamlit Cloud - so the app degrades gracefully when a
 tool is missing rather than crashing.
 """
 
@@ -27,24 +28,12 @@ import numpy as np
 from .sequences import (filter_fastq_by_length, read_fastq_records, revcomp,
                         write_fasta, collapse_whitespace)
 
-# Map a logical tool name to the env var that can override its path.
-_ENV_VARS = {"mafft": "MAFFT_BIN", "minimap2": "MINIMAP2_BIN", "samtools": "SAMTOOLS_BIN"}
+TOOLS = ("mafft", "minimap2", "samtools")
 
 
-def resolve_tool(name: str, override: str | None = None) -> str | None:
-    """Resolve a binary: explicit ``override`` -> ``<NAME>_BIN`` env -> ``PATH``."""
-    for candidate in (override,
-                      os.environ.get(_ENV_VARS.get(name, ""), None),
-                      name):
-        if candidate and shutil.which(candidate):
-            return shutil.which(candidate)
-    return None
-
-
-def tool_status(overrides: dict[str, str] | None = None) -> dict[str, str | None]:
-    """Resolved path (or None) for each external tool."""
-    overrides = overrides or {}
-    return {name: resolve_tool(name, overrides.get(name)) for name in _ENV_VARS}
+def tool_status() -> dict[str, str | None]:
+    """``PATH`` location (or None) of each external tool."""
+    return {name: shutil.which(name) for name in TOOLS}
 
 
 @functools.lru_cache(maxsize=None)
@@ -72,10 +61,9 @@ def _tool_version(name: str, path: str | None) -> str | None:
     return first
 
 
-def tool_versions(overrides: dict[str, str] | None = None) -> dict[str, str | None]:
+def tool_versions() -> dict[str, str | None]:
     """Concise version string (or None) for each external tool."""
-    status = tool_status(overrides)
-    return {name: _tool_version(name, path) for name, path in status.items()}
+    return {name: _tool_version(name, path) for name, path in tool_status().items()}
 
 
 # --- Orientation + trimming -------------------------------------------------
