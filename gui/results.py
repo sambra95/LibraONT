@@ -128,6 +128,8 @@ def _summary_cards(report: Report) -> list[str]:
         variants, var_sub = "-", "no codon positions"
 
     return [
+        _stat_card("Total reads", f"{sum(report.length_counts.values()):,}",
+                   sub=f"{report.n_reads_kept:,} kept"),
         _stat_card("Mean Phred", f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
                    sub="kept reads"),
         _stat_card("Insert length", f"{len(report.target):,} bp"),
