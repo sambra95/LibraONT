@@ -59,7 +59,6 @@ class AnalysisParams:
 # reported as discards, keeping that denominator meaningful.
 FATE_ORDER: tuple[str, ...] = (
     "Variant",
-    "Correctly assembled",            # when no variable codons are defined
     "Ambiguous diversity",
     "Wild type",
     "Deletion",
@@ -70,25 +69,15 @@ FATE_ORDER: tuple[str, ...] = (
 # Fates whose reads still feed the composition tables (partial reads contribute
 # wherever they cover the insert).
 COMPOSITION_FATES: frozenset[str] = frozenset({
-    "Variant", "Wild type", "Correctly assembled", "Ambiguous diversity"})
-
-# Fates whose reads are verified end to end AND typed at every variable codon.
-ASSEMBLED_FATES: frozenset[str] = frozenset({
-    "Variant", "Wild type", "Correctly assembled"})
+    "Variant", "Wild type", "Ambiguous diversity"})
 
 
 @dataclass
 class ReadFate:
-    """How many reads ended up with one fate, and whether they are still used.
-
-    ``applicable`` marks fates this run can produce: the typed (Variant / Wild
-    type) and untyped (Correctly assembled) branches are mutually exclusive. An
-    applicable but empty fate still belongs on the key, at 0%.
-    """
+    """How many reads ended up with one fate, and whether they are still used."""
     label: str
     count: int
     used_for_composition: bool = False
-    applicable: bool = True
 
 
 @dataclass
@@ -245,7 +234,7 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
                     f"{proj.n_uninformative:,} excluded for aligning elsewhere on "
                     "the plasmid without crossing a vector-insert junction, so "
                     "saying nothing about the insert either way",
-                    ("Library composition",), "no vector-insert junction crossed",
+                    (), "no vector-insert junction crossed",
                     passed="cross a vector-insert junction, so they report on "
                            "how the insert was assembled",
                     failed="align elsewhere on the plasmid without crossing a "
@@ -294,9 +283,11 @@ def _build_fates(params: AnalysisParams, result: AlignmentResult,
         Asymmetric: one readable non-reference codon proves a variant whatever
         its neighbours do, while wild type claims *no* designed position changed
         and so needs every diversified codon read. Anything else is ambiguous.
+        With no diversified codons selected there is nothing that could differ,
+        so a read spanning the insert is wild type by definition.
         """
-        if calls is None or ref_calls is None:      # nothing to type against
-            return "Correctly assembled" if name in spanning else "Ambiguous diversity"
+        if calls is None or ref_calls is None:
+            return "Wild type" if name in spanning else "Ambiguous diversity"
         read_calls = calls.get(name)
         if read_calls is None:
             return "Ambiguous diversity"
@@ -316,10 +307,7 @@ def _build_fates(params: AnalysisParams, result: AlignmentResult,
             counts["Deletion" if kind.startswith("deletion") else "Insertion"] += 1
         else:
             counts[usable_fate(name)] += 1
-    typed = calls is not None and ref_calls is not None
-    inapplicable = {"Correctly assembled"} if typed else {"Variant", "Wild type"}
-    return [ReadFate(label, counts[label], label in COMPOSITION_FATES,
-                     label not in inapplicable)
+    return [ReadFate(label, counts[label], label in COMPOSITION_FATES)
             for label in FATE_ORDER]
 
 

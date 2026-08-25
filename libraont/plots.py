@@ -16,14 +16,15 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from . import theme
-from .alignment import SPANNING_MIN_COVER, ReadMap
+from .alignment import ReadMap
 from .analysis import haplotype_gini, reference_match_percent
 from .constants import GENETIC_CODE
 
 _T = theme.TEMPLATE_NAME
 
 # Theme red, used to flag length-excluded reads and to mark the insert.
-_RED = "#C44E5A"
+_RED = theme.PALETTE["danger"]
+GHOST = "rgba(0,0,0,0)"
 
 _AA_NAMES: dict[str, str] = {
     "A": "Alanine",
@@ -88,12 +89,11 @@ def read_length_figure(length_counts: Counter, min_read_len: int | None = None,
                            xanchor="right" if plasmid_len >= x[-1] else "center",
                            text=f"plasmid ({plasmid_len:,} bp)", showarrow=False,
                            font=dict(size=11, color=accent))
-    description = ("Shows how many reads fall into each 10 bp length bin (all reads). "
-                   "Dashed lines mark the min/max read-length cutoffs; reads outside "
-                   "them are excluded from every other plot and the analysis.")
-    if plasmid_len:
-        description += (" The coral line marks the plasmid length: whole-plasmid reads "
-                        "pile up around it, amplicon reads well below it.")
+    description = ("Read lengths in 10 bp bins, over every read in the FASTQ. "
+                   "Dashed lines mark the length cutoffs, and reads outside them are "
+                   "excluded from every other plot")
+    description += (" - the coral line is the plasmid length, where whole-plasmid "
+                    "reads pile up." if plasmid_len else ".")
     fig.update_layout(
         template=_T, title="Read length distribution",
         xaxis_title="Read length bin (bp)", yaxis_title="Count", bargap=0.05,
@@ -267,23 +267,13 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
         bargap=0, uniformtext=dict(minsize=5, mode="hide"),
         margin=dict(l=60, r=48, t=_T_MARGIN + 12, b=_B_MARGIN),
         meta={
-            "description": "The trace on top is the percentage of covering reads "
-                           "matching the reference at each base, across every mapped "
-                           "read. Below it each row is one read, drawn where it aligns "
-                           "and coloured base by base: grey where it matches the "
-                           "reference, amber for a substituted base, red for deleted "
-                           "bases and blue on the base an insertion begins before, "
-                           "blank where the read does not reach. Every departure also "
-                           "carries a square marker, since one base is a single pixel "
-                           "across a whole plasmid; hover an indel for how many bases "
-                           "it spans. Indels smaller than the structural threshold are "
-                           "basecall noise and are not drawn. The band on top gives the "
-                           "insert's reference "
-                           "amino acid at each codon, coloured by biochemical group; "
-                           "zoom in to read the residues and their numbers. Scattered "
-                           "colour is basecall noise; a stripe running down many reads "
-                           "- and a dip in the trace - is a change shared across the "
-                           "library.",
+            "description": "Each row is one read across the plasmid, coloured base "
+                           "by base: grey matches the reference, amber a substitution, "
+                           "red a deletion, blue where an insertion begins, blank "
+                           "where the read does not reach. The trace on top is the "
+                           "percentage of covering reads matching the reference at "
+                           "each base, and the band above it gives the insert's amino "
+                           "acids by biochemical group.",
             "metric_cards": cards,
         })
     if aa_track is not None:
@@ -299,7 +289,7 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
     return fig
 
 
-# --- Read-fate waffle --------------------------------------------------------
+# --- Read fates --------------------------------------------------------------
 # One square per percent of the library, coloured by what became of those reads.
 # Proportions read more accurately off an icon array than off bar length, which
 # is the whole job here: "what fraction of my library can I actually use?"
@@ -307,7 +297,6 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
 # background and recedes; warm colours are assembly defects.
 FATE_COLORS: dict[str, str] = {
     "Variant": "#1F6F5C",
-    "Correctly assembled": "#2E7D6F",
     "Ambiguous diversity": "#9FB6C4",
     "Wild type": "#E8913C",
     "Deletion": "#D8C13F",
@@ -315,117 +304,17 @@ FATE_COLORS: dict[str, str] = {
     # Neutral greys, darkening with severity.
     "Does not contain insert region": "#646C73",
 }
-_WAFFLE_COLS = 50
-_ASSEMBLED_LABELS = frozenset({"Variant", "Wild type", "Correctly assembled"})
 def fate_descriptors(insertion_bp: int, deletion_bp: int) -> dict[str, str]:
     """A few words per fate, quoting its thresholds - the metric cards are the
     plot's only key, so each has to state its own rule."""
-    span = f"{SPANNING_MIN_COVER:.0%}"
     return {
         "Variant": "≥1 diversified codon changed",
-        "Wild type": "all diversified codons read, none changed",
-        "Correctly assembled": f"spans ≥{span}, no structural indel",
-        "Ambiguous diversity": "≥1 diversified codon unreadable",
+        "Wild type": "no diversified codon changed",
+        "Ambiguous diversity": "≥1 diversified codon unreadable or uncovered",
         "Deletion": f"deletion ≥{deletion_bp} bp",
         "Insertion": f"insertion ≥{insertion_bp} bp",
         "Does not contain insert region": "aligned, but clear of the insert",
     }
-
-
-def _apportion(counts: list[int], cells: int) -> list[int]:
-    """Largest-remainder split of ``cells`` across ``counts``, always totalling
-    exactly ``cells`` where plain rounding would not."""
-    total = sum(counts)
-    if total <= 0:
-        return [0] * len(counts)
-    exact = [c * cells / total for c in counts]
-    base = [int(math.floor(e)) for e in exact]
-    for i in sorted(range(len(counts)), key=lambda i: exact[i] - base[i],
-                    reverse=True)[:cells - sum(base)]:
-        base[i] += 1
-    return base
-
-
-def _discrete_colorscale(colors: list[str]) -> list[list]:
-    """Flat colour bands so heatmap value ``i`` renders as ``colors[i]``."""
-    n = len(colors)
-    scale = []
-    for i, color in enumerate(colors):
-        scale.append([i / n, color])
-        scale.append([(i + 1) / n, color])
-    return scale
-
-
-def read_fate_waffle_figure(fates, insertion_bp: int, deletion_bp: int,
-                            rows: int = 20) -> go.Figure:
-    """Icon array of read fates: 1000 squares, each 0.1% of the aligned reads.
-
-    Reads discarded before alignment are reported separately, not here. Squares
-    run in fate order so each group is contiguous.
-    """
-    present = [f for f in fates if f.count > 0]
-    keyed = [f for f in fates if f.applicable]   # empty ones stay on the key at 0%
-    describe = fate_descriptors(insertion_bp, deletion_bp)
-    total = sum(f.count for f in fates)
-    if not present or total <= 0:
-        return _empty("No reads to classify", "Library composition")
-
-    cells = rows * _WAFFLE_COLS
-    squares = _apportion([f.count for f in present], cells)
-    labels = [f.label for f in present]
-    colors = [FATE_COLORS.get(label, theme.PALETTE["muted"]) for label in labels]
-
-    order: list[int] = []
-    for idx, n in enumerate(squares):
-        order.extend([idx] * n)
-    z = np.full((rows, _WAFFLE_COLS), np.nan)
-    text = np.full((rows, _WAFFLE_COLS), "", dtype=object)
-    for cell, idx in enumerate(order[:cells]):
-        r, c = divmod(cell, _WAFFLE_COLS)
-        z[r, c] = idx
-        count = present[idx].count
-        text[r, c] = (f"<b>{labels[idx]}</b><br>{count:,} "
-                      f"read{'' if count == 1 else 's'} ({count / total:.1%})<br>"
-                      f"{describe.get(labels[idx], '')}")
-
-    fig = go.Figure(go.Heatmap(
-        z=z, text=text, xgap=1, ygap=1, showscale=False,
-        zmin=-0.5, zmax=len(labels) - 0.5,
-        colorscale=_discrete_colorscale(colors),
-        hovertemplate="%{text}<extra></extra>"))
-    variant = sum(f.count for f in fates if f.label == "Variant")
-    wild = sum(f.count for f in fates if f.label == "Wild type")
-    typed = variant + wild
-    fig.update_layout(
-        template=_T,
-        title="Library Composition",
-        height=380, margin=dict(t=70, l=20, r=20, b=20),
-        xaxis=dict(visible=False, fixedrange=True),
-        yaxis=dict(visible=False, autorange="reversed", scaleanchor="x",
-                   scaleratio=1, fixedrange=True),
-        showlegend=False,
-        meta={
-            "description":
-                "Every aligned read lands in exactly one category, so these "
-                "squares are every read that aligned to the reference. Green is "
-                "variant - a change at one or more diversified codons. Orange is wild "
-                "type: every diversified codon read, none of them changed. Blue-grey "
-                "sits between them, where the insert is present but a diversified "
-                "codon could not be read, so the read could be either. Yellow and red "
-                "are structural defects, judged before diversity is considered. The "
-                "cards above are the colour key.",
-            # One card per fate, coloured to match its squares: with no legend on
-            # the plot these are the key, so they must cover every category shown.
-            "metric_cards": [
-                {"label": f.label, "value": f"{f.count / total:.1%}",
-                 "sub": f"{f.count:,} read{'' if f.count == 1 else 's'} — "
-                        f"{describe.get(f.label, '')}",
-                 "color": FATE_COLORS.get(f.label, theme.PALETTE["muted"])}
-                for f in keyed
-            ],
-            "cards_inline": True,
-        })
-    return fig
 
 
 def _aa_track(ref_seq: str, length: int, frame_offset: int, *,
@@ -560,9 +449,10 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         meta={
             "description": "Reference-match frequency at each insert base, gaps "
-                           "excluded from the denominator. Low positions indicate likely "
-                           "variable or mutated sites. The band above the plot gives the "
-                           "reference amino acid at each codon, coloured by biochemical group.",
+                           "excluded from the denominator; low positions mark likely "
+                           "variable or mutated sites. The band above gives the "
+                           "reference amino acid at each codon, coloured by "
+                           "biochemical group.",
             "metric_cards": cards,
         },
     )
@@ -728,13 +618,10 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *, title: str = "Treemap of u
     fig.update_layout(
         template=_T, height=500, title=title,
         meta={
-            "description": "Shows unique amino-acid haplotypes across the selected codons. "
-                           "The reference-matching combination is outlined in black. "
-                           "Larger rectangles represent more abundant variant combinations. "
-                           "Only identified codons are considered when defining variants and "
-                           "calculating amino-acid Hamming distances. "
-                           "Gini summarizes unevenness: 0 means variants are evenly represented, "
-                           "while values closer to 1 mean a few variants dominate.",
+            "description": "Unique amino-acid haplotypes across the selected codons, "
+                           "sized by abundance, with the reference combination "
+                           "outlined in black. Gini summarises unevenness: 0 is evenly "
+                           "represented, closer to 1 means a few variants dominate.",
             "metric_cards": [
                 {"label": "Unique sequences", "value": f"{len(df):,}"},
                 {"label": "Reads", "value": f"{total:,}"},
@@ -825,14 +712,49 @@ def _rgba(hex_colour: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def read_funnel_sankey_figure(funnel) -> go.Figure:
+_DIVERSITY_HOVER = {
+    "Variant": "carry a change at one or more diversified codons",
+    "Wild type": "cover every diversified codon and carry no change at any of them",
+    "Ambiguous diversity": "carry no detected change, but do not cover every "
+                           "diversified codon",
+}
+_EMPTY = "No insert (empty vector)"
+
+
+def read_funnel_sankey_figure(funnel, fates=(), insertion_bp: int = 0,
+                              deletion_bp: int = 0) -> go.Figure:
     """Reads flowing through each filter: a teal trunk narrowing along the top,
-    with each step's losses curving away into a red branch below. Empty branches
-    keep a hairline and a label, so no filter is ever hidden."""
+    with each step's losses curving away below it. Early filters drop their reads
+    where they leave; the verdicts on a read that reached the insert - empty
+    vector, structural indel, and the diversity call - all run to the right-hand
+    edge so they can be read off together. Empty branches keep a hairline and a
+    label, so nothing is ever hidden."""
     stages = [s for s in funnel if s.count is not None]
     if len(stages) < 2:
         return _empty("No filtering steps to draw")
     pal = theme.PALETTE
+    last = next((i for i, s in enumerate(stages) if s.label == "Correctly assembled"),
+                len(stages) - 1)
+    stages = stages[:last + 1]
+    counts = {f.label: f.count for f in fates}
+    describe = fate_descriptors(insertion_bp, deletion_bp)
+    # Losses from these steps are verdicts on a read that reached the insert, so
+    # they run to the edge instead of stopping under their own column - the
+    # structural step splitting into the two kinds of defect.
+    to_edge = {
+        "Contains the insert": [
+            (_EMPTY, "Does not contain insert region",
+             FATE_COLORS["Does not contain insert region"])],
+        "Correctly assembled": [
+            (k, k, FATE_COLORS[k]) for k in ("Deletion", "Insertion")],
+    }
+    hover_for = dict(_DIVERSITY_HOVER,
+                     Deletion=f"carry a deletion ≥ {deletion_bp} bp",
+                     Insertion=f"carry an insertion ≥ {insertion_bp} bp")
+    call = [(label, counts[label], FATE_COLORS[label], hover_for[label], label)
+            for label in ("Variant", "Wild type", "Ambiguous diversity")
+            if label in counts]
+
     n, start = len(stages), stages[0].count or 1
     # Zero-width links vanish in Plotly, so give them a sliver of the total.
     hair = start * 0.005
@@ -843,77 +765,129 @@ def read_funnel_sankey_figure(funnel) -> go.Figure:
     # sizes a node as value/depth of the plot, with depth the total flow, so
     # every top edge lands on ``crest`` and the trunk stays level.
     crest, floor, gap = 0.01, 0.97, 0.07
-    depth = max(kept[0] / 0.5, (kept[0] + max(lost)) / (floor - crest - gap))
+    depth = max(kept[0] / 0.36, (kept[0] + max(lost)) / (floor - crest - gap))
     spacer = depth - kept[0]
 
-    step = 0.90 / (n - 1)
-    xs = [0.03 + i * step for i in range(n)]
+    right = 0.80
+    step = right / (n - 1)
+    xs = [0.02 + i * step for i in range(n)]
     ys = [crest + 0.5 * k / depth for k in kept]
+    tints = [pal["primary_dark"]] * n
+    caps = [f"<b>{s.label}</b><br>{s.count:,} reads"
+            + (f" - {s.passed}" if s.passed else "") for s in stages]
     src, tgt, value, hover, colors = [], [], [], [], []
+    drops, tail = [], []                     # short branches, and edge-bound ones
     for i, (a, b) in enumerate(zip(stages, stages[1:])):
-        src += [i, i]
-        tgt += [i + 1, n + i]
-        value += [kept[i + 1], lost[i]]
-        hover += [f"<b>{b.count:,} reads</b> {b.passed or 'carried on'}",
-                  f"<b>{a.count - b.count:,} reads</b> "
-                  f"{b.failed or 'were removed here'}"]
-        colors += [_rgba(pal["primary"], 0.32), _rgba(_RED, 0.42)]
+        gone = a.count - b.count
+        note = f"<b>{gone:,} reads</b> {b.failed or 'were removed here'}"
+        src.append(i)
+        tgt.append(i + 1)
+        value.append(kept[i + 1])
+        hover.append(f"<b>{b.count:,} reads</b> {b.passed or 'carried on'}")
+        colors.append(_rgba(pal["primary"], 0.32))
+        if b.label in to_edge:
+            tail.append([(label, counts.get(fate, gone), tint,
+                          f"<b>{counts.get(fate, gone):,} reads</b> "
+                          f"{hover_for.get(fate) or b.failed or 'were removed'}",
+                          i, fate)
+                         for label, fate, tint in to_edge[b.label]])
+            continue
+        src.append(i)
+        tgt.append(len(xs))
+        value.append(lost[i])
+        hover.append(note)
+        colors.append(_rgba(_RED, 0.42))
+        drops.append((xs[i + 1], b.lost or "removed", gone))
         xs.append(xs[i + 1])
         ys.append(floor - 0.5 * lost[i] / depth)
-    src.append(2 * n - 1)                       # the invisible scale-setter
-    tgt.append(2 * n)
+        tints.append(_RED)
+        caps.append(note)
+
+    # Everything that ends the story lands in one column, the trunk's own
+    # continuation on top and each verdict stacked below it in the order it left.
+    edge = [(label, count, tint, f"<b>{count:,} reads</b> {note}", n - 1, fate)
+            for label, count, tint, note, fate in call]
+    edge += [item for group in reversed(tail) for item in group]
+    ends = [max(count, hair) for _, count, _, _, _, _ in edge]
+    splay = min(0.13, (0.95 - crest - sum(ends) / depth) / max(1, len(edge) - 1))
+    fan, top = len(xs), crest
+    for j, (label, count, tint, note, source, _) in enumerate(edge):
+        src.append(source)
+        tgt.append(len(xs))
+        value.append(ends[j])
+        hover.append(note)
+        colors.append(_rgba(tint, 0.42))
+        xs.append(0.02 + right + 0.05)
+        ys.append(top + 0.5 * ends[j] / depth)
+        tints.append(tint)
+        caps.append(f"<b>{label}</b><br>{count:,} reads")
+        top += ends[j] / depth + splay
+
+    src.append(len(xs))                      # the invisible scale-setter
+    tgt.append(len(xs) + 1)
     value.append(spacer)
     hover.append("")
-    colors.append("rgba(0,0,0,0)")
-    xs += [0.975, 0.995]
+    colors.append(GHOST)
+    xs += [0.999, 0.9999]                    # tucked into the right-hand edge
     ys += [0.5, 0.5]
+    tints += [GHOST, GHOST]
+    caps += ["", ""]
+    # Plotly would pop an empty hover box over the scale-setter, so its label is
+    # made transparent rather than merely blank.
+    def ghost_label(total, ghosts):
+        real = total - ghosts
+        return dict(bgcolor=[pal["surface"]] * real + [GHOST] * ghosts,
+                    bordercolor=[pal["grid"]] * real + [GHOST] * ghosts,
+                    font=dict(color=[pal["text"]] * real + [GHOST] * ghosts))
 
     # Captions ride outside the ribbon - Plotly's own node labels sit on top of
     # it in a halo box, and collide once the columns are close.
     lo, hi = 0.13, 0.80
-    notes = []
-    for i, s in enumerate(stages):
-        notes.append(dict(
-            x=xs[i], y=hi + 0.015, yanchor="bottom",
-            xanchor="left" if i == 0 else "right" if i == n - 1 else "center",
-            text=f"<b>{'<br>'.join(textwrap.wrap(s.label, 16))}</b><br>"
-                 f"<span style='color:{pal['muted']}'>{s.count:,} · "
-                 f"{s.count / start:.0%}</span>",
-            font=dict(size=11, color=pal["primary_dark"])))
-    for i, b in enumerate(stages[1:]):
-        notes.append(dict(
-            x=xs[i + 1], y=lo - 0.015, yanchor="top",
-            xanchor="right" if i == n - 2 else "center",
-            text=f"{'<br>'.join(textwrap.wrap(b.lost or 'removed', 18))}<br>"
-                 f"<b>{stages[i].count - b.count:,}</b>",
-            font=dict(size=10.5, color=_RED)))
+    notes = [dict(x=xs[i], y=hi + 0.015, yanchor="bottom",
+                  xanchor="left" if i == 0 else "right" if i == n - 1 else "center",
+                  text=f"<b>{'<br>'.join(textwrap.wrap(s.label, 16))}</b><br>"
+                       f"<span style='color:{pal['muted']}'>{s.count:,} · "
+                       f"{s.count / start:.0%}</span>",
+                  font=dict(size=11, color=pal["primary_dark"]))
+             for i, s in enumerate(stages)]
+    notes += [dict(x=x, y=lo - 0.015, yanchor="top", xanchor="center",
+                   text=f"{'<br>'.join(textwrap.wrap(label, 18))}<br><b>{gone:,}</b>",
+                   font=dict(size=10.5, color=_RED))
+              for x, label, gone in drops]
+    notes += [dict(x=xs[fan + j] + 0.012, y=hi - (hi - lo) * ys[fan + j],
+                   xanchor="left", yanchor="middle",
+                   text=f"<b>{'<br>'.join(textwrap.wrap(label, 14))}</b><br>"
+                        f"{count:,} · {count / start:.0%}",
+                   font=dict(size=10.5, color=tint))
+              for j, (label, count, tint, _, _, _) in enumerate(edge)]
 
     fig = go.Figure(go.Sankey(
         arrangement="fixed", domain=dict(x=[0, 1], y=[lo, hi]),
         node=dict(label=[""] * len(xs), x=xs, y=ys, pad=0, thickness=11,
-                  color=[pal["primary_dark"]] * n + [_RED] * (n - 1)
-                  + ["rgba(0,0,0,0)"] * 2,
-                  line=dict(color="white", width=0.5),
-                  customdata=[f"<b>{s.label}</b><br>{s.count:,} reads"
-                              + (f" - {s.passed}" if s.passed else "")
-                              for s in stages]
-                  + [f"<b>{stages[i].count - b.count:,} reads</b> "
-                     f"{b.failed or 'were removed here'}"
-                     for i, b in enumerate(stages[1:])] + ["", ""],
+                  color=tints, line=dict(color="white", width=0.5),
+                  customdata=caps, hoverlabel=ghost_label(len(xs), 2),
                   hovertemplate="%{customdata}<extra></extra>"),
         link=dict(source=src, target=tgt, value=value, color=colors,
-                  customdata=hover, hovertemplate="%{customdata}<extra></extra>"),
+                  customdata=hover, hoverlabel=ghost_label(len(value), 1),
+                  hovertemplate="%{customdata}<extra></extra>"),
     ))
     fig.update_layout(
-        template=_T, title="Library FASTQ read processing", height=520,
-        margin=dict(l=20, r=20, t=54, b=10),
+        template=_T, title="Library FASTQ read processing", height=600,
+        margin=dict(l=10, r=10, t=54, b=10),
         annotations=[dict(xref="paper", yref="paper", showarrow=False,
                           align="center", **a) for a in notes],
         meta={"description":
               "Every read in the FASTQ followed through each filter: the teal "
               "trunk is what carries on, each red branch what that step removes. "
               f"{stages[-1].count:,} of {start:,} reads "
-              f"({stages[-1].count / start:.1%}) reach the last step. A filter "
-              "that removed nothing keeps a hairline branch, so none is hidden."},
+              f"({stages[-1].count / start:.1%}) are correctly assembled, and the "
+              "column on the right is every way a read can end up.",
+              # The key for that column, moved off the icon array so it sits
+              # with the branches it names.
+              "metric_cards": [
+                  {"label": label, "value": f"{count / (sum(e[1] for e in edge) or 1):.1%}",
+                   "sub": f"{count:,} read{'' if count == 1 else 's'} — "
+                          f"{describe.get(fate, '')}", "color": tint}
+                  for label, count, tint, _, _, fate in edge]},
     )
     return fig

@@ -24,6 +24,7 @@ PALETTE: dict[str, str] = {
     "text": "#26323A",
     "grid": "#E6EBEF",
     "muted": "#6B7B86",
+    "danger": "#C44E5A",        # reads lost, failed checks, warnings
 }
 
 # Harmonious qualitative palette for treemaps / general categories.

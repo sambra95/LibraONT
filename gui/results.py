@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import base64
-import math
 import html
 import os
 import zipfile
@@ -15,7 +14,6 @@ import streamlit as st
 
 from libraont import plots, theme
 from libraont.alignment import tool_versions
-from libraont.analysis import haplotype_gini
 from libraont.pipeline import Report
 from libraont.sequences import clean_sequence
 
@@ -26,7 +24,9 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
     the correctly assembled reads only."""
     p = report.params
     figs: list[tuple[str, object]] = [
-        ("Read processing", plots.read_funnel_sankey_figure(report.funnel)),
+        ("Read processing", plots.read_funnel_sankey_figure(
+            report.funnel, report.fates,
+            p.structural_insertion_bp, p.structural_deletion_bp)),
         ("Read lengths", plots.read_length_figure(
             report.length_counts, p.min_read_len, p.max_read_len,
             plasmid_len=len(clean_sequence(p.plasmid_seq)) if p.plasmid_seq else None)),
@@ -36,8 +36,6 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
                      plots.read_alignment_figure(report.read_map, report.target,
                                                  p.structural_insertion_bp,
                                                  p.structural_deletion_bp)))
-    figs.append(("Library composition", plots.read_fate_waffle_figure(
-        report.fates, p.structural_insertion_bp, p.structural_deletion_bp)))
     figs.append(("Gap & match %", plots.gap_match_figure(
         report.df_counts, ref_seq=report.target[:len(report.df_counts)],
         shade_codons=report.valid_positions or None, frame_offset=0,
@@ -84,31 +82,26 @@ def _card(label: str, value: str, sub: str, accent: str, s: dict) -> str:
         f"{sub_html}</div>")
 
 
-def _stat_card(label: str, value: str, *, sub: str = "") -> str:
+def _stat_card(label: str, value: str, *, sub: str = "", accent: str = "") -> str:
     """One summary statistic, for the big flex row at the top of the report."""
-    return _card(str(label), str(value), str(sub), theme.PALETTE["primary"], _CARD_LARGE)
+    return _card(str(label), str(value), str(sub),
+                 accent or theme.PALETTE["primary"], _CARD_LARGE)
 
 
-def _metric_cards_html(cards: list[dict], rows: int = 0) -> str:
-    """Metric cards as a wrapping flex row, or a grid of exactly ``rows`` rows.
+def _metric_cards_html(cards: list[dict]) -> str:
+    """Metric cards as a wrapping flex row.
 
     ``color`` on a card overrides the accent, since these double as the colour
     key for plots that carry no legend.
     """
     if not cards:
         return ""
-    preset = _CARD_COMPACT if not rows else {**_CARD_COMPACT, "box": ""}
-    html_cards = [
-        _card(str(c.get("label", "")), str(c.get("value", "")), str(c.get("sub", "")),
-              c.get("color") or theme.PALETTE["primary"], preset)
-        for c in cards]
-    if rows:
-        cols = max(1, math.ceil(len(html_cards) / rows))
-        style = (f"display:grid;grid-template-columns:repeat({cols},minmax(0,1fr));"
-                 "gap:8px;margin:0")
-    else:
-        style = "display:flex;gap:10px;flex-wrap:wrap;margin:-4px 0 10px"
-    return f"<div class='metric-cards' style='{style}'>" + "".join(html_cards) + "</div>"
+    return ("<div class='metric-cards' style='display:flex;gap:10px;flex-wrap:wrap;"
+            "margin:-4px 0 10px'>" + "".join(
+                _card(str(c.get("label", "")), str(c.get("value", "")),
+                      str(c.get("sub", "")),
+                      c.get("color") or theme.PALETTE["primary"], _CARD_COMPACT)
+                for c in cards) + "</div>")
 
 
 def _figure_meta(fig: go.Figure) -> dict:
@@ -134,28 +127,20 @@ def _figure_description(fig: go.Figure) -> None:
 
 def _summary_cards(report: Report) -> list[str]:
     """Summary card HTML shared by Streamlit rendering and HTML export."""
-    if report.hap_df is not None and not report.hap_df.empty:
-        variants, var_sub = f"{len(report.hap_df):,}", f"Gini {haplotype_gini(report.hap_df):.3f}"
-    else:
-        variants, var_sub = "-", "no codon positions"
-
-    spanning, assembled_n = report.n_spanning, report.n_assembled
-    assembled = f"{assembled_n / spanning:.1%}" if spanning else "-"
-    total = sum(report.length_counts.values())
-    unaligned = report.n_discarded_unaligned
-    unaligned_sub = (f"{unaligned / total:.1%} of reads — likely contaminant DNA"
-                     if total else "")
+    insert = len(report.target)
+    codons, spare = divmod(insert, 3)
+    plasmid = clean_sequence(report.params.plasmid_seq or "")
     return [
-        _stat_card("Total reads", f"{total:,}",
-                   sub=f"{report.projection.n_informative:,} informative about the insert"),
-        _stat_card("Discarded, no alignment", f"{unaligned:,}", sub=unaligned_sub),
-        _stat_card("Correctly assembled", assembled,
-                   sub=f"{assembled_n:,} of {spanning:,} spanning reads"),
-        _stat_card("Mean Phred", f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
+        _stat_card("Total reads", f"{sum(report.length_counts.values()):,}"),
+        _stat_card("Mean Phred",
+                   f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
                    sub="all reads"),
-        _stat_card("Insert length", f"{len(report.target):,} bp"),
-        _stat_card("Codons", f"{report.df_aa_counts.shape[0]:,}"),
-        _stat_card("Unique variants", variants, sub=var_sub),
+        _stat_card("Insert length", f"{insert:,} bp",
+                   sub=f"not a whole number of codons - {spare} spare "
+                       f"base{'' if spare == 1 else 's'}" if spare else "",
+                   accent=theme.PALETTE["danger"] if spare else ""),
+        _stat_card("Plasmid length", f"{len(plasmid):,} bp" if plasmid else "-"),
+        _stat_card("Codons", f"{codons:,}" + (f" + {spare} bp" if spare else "")),
     ]
 
 
@@ -307,15 +292,10 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
         title = html.escape(str(fig.layout.title.text or label))
         description = html.escape(_figure_description_text(fig))
         caption = f"<p class='caption'>{description}</p>" if description else ""
-        meta = _figure_meta(fig)
-        cards = meta.get("metric_cards") or []
+        cards = _figure_meta(fig).get("metric_cards") or []
         image_uri = _figure_png_data_uri(fig)
-        plot_html = f"<div class='plot'><img src='{image_uri}' alt='{title}'></div>"
-        if meta.get("cards_inline") and cards:
-            body = (f"<div class='plot-inline'>{plot_html}<div class='plot-key'>"
-                    f"{_metric_cards_html(cards, rows=2)}</div></div>")
-        else:
-            body = _metric_cards_html(cards) + plot_html
+        body = (_metric_cards_html(cards)
+                + f"<div class='plot'><img src='{image_uri}' alt='{title}'></div>")
         sections.append(
             f"<section class='plot-section'><h2>{title}</h2>{caption}{body}</section>")
 
@@ -436,17 +416,6 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
       flex: 3 1 0;
       min-width: 0;
     }}
-    .plot-inline {{
-      display: flex;
-      gap: 16px;
-      align-items: center;
-      flex-wrap: wrap;
-      margin-top: 4px;
-    }}
-    .plot-key {{
-      flex: 2 1 320px;
-      min-width: 0;
-    }}
     .plot img {{
       display: block;
       width: 100%;
@@ -534,15 +503,8 @@ def render(report: Report) -> None:
         _figure_description(fig)
         chart = go.Figure(fig).update_layout(title_text="")
         config = {"toImageButtonOptions": {"format": "svg"}}
-        cards = _figure_meta(fig).get("metric_cards") or []
-        if _figure_meta(fig).get("cards_inline") and cards:
-            col_plot, col_key = st.columns([3, 2], vertical_alignment="center")
-            col_plot.plotly_chart(chart, use_container_width=True, config=config)
-            col_key.markdown(_metric_cards_html(cards, rows=2),
-                             unsafe_allow_html=True)
-        else:
-            _figure_metric_cards(fig)
-            st.plotly_chart(chart, use_container_width=True, config=config)
+        _figure_metric_cards(fig)
+        st.plotly_chart(chart, use_container_width=True, config=config)
 
     _funnel_detail(report)
     _tables(report)
