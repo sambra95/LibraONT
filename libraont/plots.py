@@ -131,7 +131,8 @@ _EVENT_MARKER = dict(size=3, symbol="square", line=dict(width=0))
 
 
 def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
-                          insertion_bp: int = 0, deletion_bp: int = 0) -> go.Figure:
+                          insertion_bp: int = 0, deletion_bp: int = 0,
+                          auto_match_threshold: float | None = None) -> go.Figure:
     """One row per read, coloured base by base against the reference: grey
     match, amber substitution, red deletion, blue on the base an insertion
     begins before, blank where the read does not reach. Each departure also gets
@@ -176,28 +177,33 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
 
     x_max = cov.contig_length or int(ends.max())
     _T_MARGIN, _B_MARGIN = 60, 48
-    height = int(min(780, max(300, n_shown + _T_MARGIN + _B_MARGIN + 160)))
+    height = int(min(880, max(340, n_shown + _T_MARGIN + _B_MARGIN + 230)))
     positions = np.arange(1, matrix.shape[1] + 1)
 
     depth = cov.depth_counts.astype(float)
     with np.errstate(invalid="ignore", divide="ignore"):
         pct = np.where(depth > 0, 100.0 * cov.match_counts / depth, np.nan)
 
-    aa_track = None
+    # The insert's amino acids, then its bases, laid over the plasmid coordinate.
+    tracks = []
     if insert_seq and cov.region:
         reverse = cov.region.get("strand") == "-"
-        aa_track = _aa_track(
-            insert_seq, len(insert_seq), 0, yaxis=None,
-            origin=cov.region["end"] if reverse else cov.region["start"],
-            step=-1 if reverse else 1, number_labels=True)
+        placing = dict(origin=cov.region["end"] if reverse else cov.region["start"],
+                       step=-1 if reverse else 1)
+        tracks = [t for t in (
+            _aa_track(insert_seq, len(insert_seq), 0, yaxis=None,
+                      number_labels=True, **placing),
+            _base_track(insert_seq, len(insert_seq), yaxis=None, **placing),
+        ) if t is not None]
 
-    rows = 3 if aa_track is not None else 2
-    heights = [0.07, 0.20, 0.73] if aa_track is not None else [0.22, 0.78]
+    rows = len(tracks) + 2
+    heights = {2: [0.06, 0.05, 0.30, 0.59], 1: [0.07, 0.30, 0.63]}.get(
+        len(tracks), [0.30, 0.70])
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=heights,
-                        vertical_spacing=0.035)
-    trace_row, map_row = (2, 3) if aa_track is not None else (1, 2)
-    if aa_track is not None:
-        fig.add_trace(aa_track, row=1, col=1)
+                        vertical_spacing=0.025)
+    trace_row, map_row = len(tracks) + 1, len(tracks) + 2
+    for i, track in enumerate(tracks, start=1):
+        fig.add_trace(track, row=i, col=1)
     fig.add_trace(go.Scatter(
         x=positions, y=pct, mode="lines", name="Match",
         line=dict(color=theme.PALETTE["primary"], width=1.4),
@@ -205,6 +211,14 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
         customdata=depth,
         hovertemplate="Position %{x}<br>%{y:.1f}% of %{customdata:.0f} reads match"
                       "<extra></extra>"), row=trace_row, col=1)
+    if auto_match_threshold is not None:
+        fig.add_hline(y=auto_match_threshold, row=trace_row, col=1,
+                      line=dict(color=theme.PALETTE["muted"], width=1.5,
+                                dash="3px,3px"),
+                      annotation_text="codon detection cutoff",
+                      annotation_position="top left",
+                      annotation_font=dict(size=10,
+                                           color=theme.PALETTE["muted"]))
     fig.add_trace(go.Heatmap(
         z=z, x=positions, showscale=False, zmin=0.5, zmax=4.5,
         colorscale=_AGREEMENT_SCALE,
@@ -257,7 +271,7 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
         cards.append({"label": "Median identity",
                       "value": f"{np.median(idents[finite]) * 100:.1f}%"})
     if cov.region:
-        if aa_track is None:
+        if not tracks:
             _insert_marker(fig, cov.region["start"], cov.region["end"])
         cards.append({"label": "Insert",
                       "value": f"{cov.region['start']}-{cov.region['end']}"})
@@ -270,16 +284,16 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
             "description": "Each row is one read across the plasmid, coloured base "
                            "by base: grey matches the reference, amber a substitution, "
                            "red a deletion, blue where an insertion begins, blank "
-                           "where the read does not reach. The trace on top is the "
-                           "percentage of covering reads matching the reference at "
-                           "each base, and the band above it gives the insert's amino "
-                           "acids by biochemical group.",
+                           "where the read does not reach. Above it, the percentage "
+                           "of covering reads matching at each base carries the "
+                           "codon-detection cutoff, over bands giving the insert's "
+                           "amino acids and its reference bases.",
             "metric_cards": cards,
         })
-    if aa_track is not None:
+    for i, title in enumerate(["AA", "bp"][:len(tracks)], start=1):
         fig.update_yaxes(range=[0, 1], showgrid=False, zeroline=False,
-                         showticklabels=False, title_text="Insert", row=1, col=1)
-        fig.update_xaxes(range=[0, x_max], row=1, col=1)
+                         showticklabels=False, title_text=title, row=i, col=1)
+        fig.update_xaxes(range=[0, x_max], row=i, col=1)
     fig.update_yaxes(title_text="Match (%)", range=[0, 101], row=trace_row, col=1)
     fig.update_yaxes(showgrid=False, zeroline=False, showticklabels=False, title="",
                      autorange="reversed", row=map_row, col=1)
@@ -350,6 +364,28 @@ def _aa_track(ref_seq: str, length: int, frame_offset: int, *,
     return bar
 
 
+def _base_track(ref_seq: str, length: int, yaxis: str | None = "y3", *,
+                origin: int = 1, step: int = 1) -> go.Bar | None:
+    """Reference base at each position as a coloured band; letters show wherever
+    they fit. ``origin``/``step`` place the band elsewhere on the x axis, as for
+    :func:`_aa_track`."""
+    bases = (ref_seq or "").upper()[:length]
+    if not bases:
+        return None
+    colors = [theme.BASE_COLORS.get(b, theme.PALETTE["muted"]) for b in bases]
+    bar = go.Bar(x=[origin + step * i for i in range(len(bases))],
+                 y=[1] * len(bases), width=1,
+                 marker=dict(color=colors, line=dict(width=0)),
+                 text=list(bases), textposition="inside",
+                 insidetextanchor="middle", textangle=0,
+                 textfont=dict(family="monospace", size=9,
+                               color=[theme.contrast_text(c) for c in colors]),
+                 showlegend=False, hoverinfo="skip")
+    if yaxis:
+        bar.update(yaxis=yaxis)
+    return bar
+
+
 def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "-",
                      shade_codons=None, frame_offset: int = 0,
                      auto_match_threshold: float | None = None,
@@ -391,6 +427,9 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
     aa_track = _aa_track(ref_seq, L, frame_offset)
     if aa_track is not None:
         fig.add_trace(aa_track)
+    base_track = _base_track(ref_seq, L)
+    if base_track is not None:
+        fig.add_trace(base_track)
 
     if auto_match_threshold is not None:
         fig.add_trace(go.Scatter(
@@ -439,9 +478,15 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
         # Pinned to the full range: a match track that autoscaled would make a
         # 99%-vs-97% wobble look like a cliff.
         yaxis=dict(title="Percentage (%)", range=[0, 100],
-                   domain=[0, 0.90] if aa_track else [0, 1]),
-        yaxis2=dict(domain=[0.94, 1.0], range=[0, 1], fixedrange=True,
+                   domain=[0, 0.83] if base_track else
+                          [0, 0.90] if aa_track else [0, 1]),
+        yaxis2=dict(domain=[0.95, 1.0], range=[0, 1], fixedrange=True,
                     showgrid=False, zeroline=False, showticklabels=False, ticks=""),
+        # The base band sits just under the codons it spells out, and gets the
+        # same depth so its letters survive the uniform-text minimum.
+        yaxis3=dict(domain=[0.885, 0.935], range=[0, 1], fixedrange=True,
+                    showgrid=False, zeroline=False, showticklabels=False, ticks=""),
+        barmode="overlay",
         # Letters shrink to fit, dropping out only when unreadable.
         uniformtext=dict(minsize=5, mode="hide"),
         margin=dict(t=90),
@@ -450,9 +495,10 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
         meta={
             "description": "Reference-match frequency at each insert base, gaps "
                            "excluded from the denominator; low positions mark likely "
-                           "variable or mutated sites. The band above gives the "
+                           "variable or mutated sites. The bands above give the "
                            "reference amino acid at each codon, coloured by "
-                           "biochemical group.",
+                           "biochemical group, and the reference base at each "
+                           "position.",
             "metric_cards": cards,
         },
     )
@@ -563,8 +609,9 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *, title: str = "Treemap of u
     'Other'. Variants carrying an amino acid below ``min_frac`` at its codon are
     excluded (0 keeps everything), and the stats follow the remaining subset.
 
-    Reads without a clean call at every diversified codon have no combination to
-    place, so they are absent from the tiles and from the denominator."""
+    A read missing more than the tolerated number of diversified codons has no
+    combination to place, so it is absent from the tiles and the denominator;
+    within the tolerance, the codons it misses read '?'."""
     if hap_df.empty:
         return _empty("No haplotypes to display", title)
 
@@ -885,8 +932,8 @@ def read_funnel_sankey_figure(funnel, fates=(), insertion_bp: int = 0,
               # The key for that column, moved off the icon array so it sits
               # with the branches it names.
               "metric_cards": [
-                  {"label": label, "value": f"{count / (sum(e[1] for e in edge) or 1):.1%}",
-                   "sub": f"{count:,} read{'' if count == 1 else 's'} — "
+                  {"label": label, "value": f"{count / start:.0%}",
+                   "sub": f"{count:,} read{'' if count == 1 else 's'} - "
                           f"{describe.get(fate, '')}", "color": tint}
                   for label, count, tint, _, _, fate in edge]},
     )

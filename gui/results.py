@@ -8,7 +8,6 @@ import html
 import os
 import zipfile
 
-import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -35,7 +34,8 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
         figs.append(("Read alignment map",
                      plots.read_alignment_figure(report.read_map, report.target,
                                                  p.structural_insertion_bp,
-                                                 p.structural_deletion_bp)))
+                                                 p.structural_deletion_bp,
+                                                 p.auto_codon_match_pct)))
     figs.append(("Gap & match %", plots.gap_match_figure(
         report.df_counts, ref_seq=report.target[:len(report.df_counts)],
         shade_codons=report.valid_positions or None, frame_offset=0,
@@ -140,7 +140,9 @@ def _summary_cards(report: Report) -> list[str]:
                        f"base{'' if spare == 1 else 's'}" if spare else "",
                    accent=theme.PALETTE["danger"] if spare else ""),
         _stat_card("Plasmid length", f"{len(plasmid):,} bp" if plasmid else "-"),
-        _stat_card("Codons", f"{codons:,}" + (f" + {spare} bp" if spare else "")),
+        _stat_card("Codons",
+                   f"{codons:,}" + (f" + {spare} bp \u26a0\ufe0f" if spare else ""),
+                   accent=theme.PALETTE["danger"] if spare else ""),
     ]
 
 
@@ -235,19 +237,6 @@ def _sequences_html(report: Report) -> str:
         + _sequence_block("Insert sequence", report.target)
         + _sequence_block("Plasmid sequence", report.params.plasmid_seq)
         + "</section>")
-
-
-def _funnel_detail(report: Report) -> None:
-    """Stage-by-stage read accounting, and which plots consume each stage."""
-    with st.expander("Read filtering, step by step"):
-        st.caption("The same journey as the library-composition squares above, "
-                   "read as a sequence of filters.")
-        st.dataframe(
-            pd.DataFrame([{"Step": s.label, "Reads": s.count,
-                           "Rule": s.detail,
-                           "Used by": ", ".join(s.used_by) or "-"}
-                          for s in report.funnel]),
-            hide_index=True, use_container_width=True)
 
 
 def _tables(report: Report) -> None:
@@ -506,6 +495,5 @@ def render(report: Report) -> None:
         _figure_metric_cards(fig)
         st.plotly_chart(chart, use_container_width=True, config=config)
 
-    _funnel_detail(report)
     _tables(report)
     _downloads(report, figs)

@@ -43,8 +43,8 @@ def _figure(name: str, alt: str, width: str = "100%") -> None:
 
 with st.expander("How a read becomes a number", expanded=False):
     _figure("workflow.svg", "LibraONT workflow")
-    st.caption("Bar widths are illustrative; the counts for this run are in "
-               "**Read filtering, step by step** below the plots.")
+    st.caption("Bar widths are illustrative; the counts for this run are in the "
+               "**Library FASTQ read processing** plot below.")
     _figure("criteria.svg", "LibraONT classification rules", width="60%")
 
 params, run_clicked, error = inputs.render_sidebar()

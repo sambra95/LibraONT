@@ -178,19 +178,28 @@ def read_codon_calls(msa: dict[str, str], ref_codons: list[tuple[int, int, int]]
 
 
 def read_haplotypes(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
-                    positions, ref_name: str = "REF") -> dict[str, tuple | None]:
-    """Per read, the AA tuple across ``positions``, or ``None`` unless every
-    requested codon reads cleanly."""
-    return {name: (calls if all(c is not None for c in calls) else None)
-            for name, calls in read_codon_calls(msa, ref_codons, positions,
-                                                ref_name).items()}
+                    positions, ref_name: str = "REF", *, unknown: str = "?",
+                    max_unknown: int = 0) -> dict[str, tuple | None]:
+    """Per read, the AA tuple across ``positions``, or ``None`` when more than
+    ``max_unknown`` of them cannot be read. Codons that cannot be read carry
+    ``unknown``; at the default of 0 that never happens and only reads called at
+    every position keep a haplotype."""
+    out: dict[str, tuple | None] = {}
+    for name, calls in read_codon_calls(msa, ref_codons, positions,
+                                        ref_name).items():
+        out[name] = (tuple(c if c is not None else unknown for c in calls)
+                     if sum(c is None for c in calls) <= max_unknown else None)
+    return out
 
 
 def haplotype_counts(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
-                     positions, ref_name: str = "REF") -> pd.DataFrame:
+                     positions, ref_name: str = "REF", *, unknown: str = "?",
+                     max_unknown: int = 0) -> pd.DataFrame:
     """Unique AA combinations across the given 1-based codon positions, from
-    reads called at *all* of them. Columns: ``combo_label, combo_tuple, count,
-    is_reference, aa_hamming_distance``, descending by count."""
+    reads missing at most ``max_unknown`` of them. A codon that cannot be read
+    carries ``unknown`` and counts as a residue in its own right. Columns:
+    ``combo_label, combo_tuple, count, is_reference, aa_hamming_distance``,
+    descending by count."""
     cols = ["combo_label", "combo_tuple", "count", "is_reference", "aa_hamming_distance"]
     pos_ok = [p for p in positions if 1 <= p <= len(ref_codons)]
     if not pos_ok:
@@ -209,7 +218,9 @@ def haplotype_counts(msa: dict[str, str], ref_codons: list[tuple[int, int, int]]
     ref_tuple = tuple(ref_hap) if ref_ok else None
 
     ctr: Counter = Counter(
-        hap for hap in read_haplotypes(msa, ref_codons, pos_ok, ref_name).values()
+        hap for hap in read_haplotypes(msa, ref_codons, pos_ok, ref_name,
+                                       unknown=unknown,
+                                       max_unknown=max_unknown).values()
         if hap is not None)
 
     if not ctr:

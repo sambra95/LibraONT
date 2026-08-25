@@ -60,6 +60,12 @@ AA_COLORS: dict[str, str] = {
 }
 AA_COLORS["*"] = "#5A5A5A"
 
+# Nucleotides as one pale blue ramp, kept clear of every amino-acid colour so
+# the base band never reads as part of the codon band above it.
+BASE_COLORS: dict[str, str] = {
+    "A": "#F2F7FC", "C": "#B0CDEA", "G": "#5E92C7", "T": "#2B5C91",
+}
+
 TEMPLATE_NAME = "libraont"
 
 
@@ -119,6 +125,7 @@ activate()
 
 __all__ = [
     "PALETTE", "CATEGORICAL", "GAP_COLOR", "MATCH_COLOR",
-    "AA_GROUPS", "AA_GROUP_COLORS", "AA_COLORS", "TEMPLATE_NAME", "activate",
+    "AA_GROUPS", "AA_GROUP_COLORS", "AA_COLORS", "BASE_COLORS",
+    "TEMPLATE_NAME", "activate",
     "aa_color_sequence", "fade", "FADE_GREY", "contrast_text", "AA_ORDER",
 ]

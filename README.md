@@ -16,14 +16,14 @@ automatically detected codons.
 
 ## Inputs
 
-- **FASTQ file** — nanopore reads (`.fastq`, `.fq`, or gzipped).
-- **Gene sequence** — the reference gene/insert (A/C/G/T/N, case-insensitive).
-- **Plasmid sequence** *(optional)* — full plasmid; enables the read alignment map.
-- **Insert region** — the full gene, or a start/stop sub-region.
-- **Minimum identity** — read-to-insert identity cutoff for keeping reads.
-- **Read length range / padding** — length window for reads, and bases kept either side when trimming.
-- **Codon positions** — typed manually, or auto-detected from a reference-match threshold.
-- **Grouping threshold / rare variants** — fold low-frequency amino acids into `Other` and include or exclude rare variants in the treemap.
+- **FASTQ file** - nanopore reads (`.fastq`, `.fq`, or gzipped).
+- **Gene sequence** - the reference gene/insert (A/C/G/T/N, case-insensitive).
+- **Plasmid sequence** _(optional)_ - full plasmid; enables the read alignment map.
+- **Insert region** - the full gene, or a start/stop sub-region.
+- **Minimum identity** - read-to-insert identity cutoff for keeping reads.
+- **Read length range / padding** - length window for reads, and bases kept either side when trimming.
+- **Codon positions** - typed manually, or auto-detected from a reference-match threshold.
+- **Grouping threshold / rare variants** - fold low-frequency amino acids into `Other` and include or exclude rare variants in the treemap.
 
 ## Outputs
 
@@ -45,7 +45,7 @@ Downloads:
 
 Requires [conda or mamba](https://github.com/conda-forge/miniforge). The environment file
 bundles Python, the app's Python dependencies, and the external tools (minimap2,
-samtools) — no separate installs needed.
+samtools) - no separate installs needed.
 
 ```bash
 git clone https://github.com/sambra95/LibraONT.git

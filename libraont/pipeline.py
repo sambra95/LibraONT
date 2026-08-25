@@ -25,6 +25,7 @@ from .sequences import extract_target, fastq_stats
 Progress = Optional[Callable[[float, str], None]]
 
 REF_NAME = "REF"
+UNCALLED = "?"          # stands in for a diversified codon a read does not cover
 
 
 @dataclass
@@ -49,6 +50,9 @@ class AnalysisParams:
     # the AA pies, and variants containing one are dropped from the treemap. 0
     # keeps everything.
     pie_min_frac: float = DEFAULT_PIE_MIN_FRAC
+    # How many diversified codons a read may miss and still earn a tile in the
+    # variant treemap; the ones it misses are written as '?'.
+    max_unknown_codons: int = 0
     # When set, codons with a position below this reference-match % are auto-added
     # to ``pie_positions`` (variable-codon detection). ``None`` disables it.
     auto_codon_match_pct: Optional[float] = None
@@ -110,6 +114,9 @@ class Report:
     mean_phred: Optional[float] = None
     hap_df: Optional[pd.DataFrame] = None
     read_map: Optional[ReadMap] = None
+    # Most diversified codons any single read fails to cover - the ceiling worth
+    # offering on the treemap's tolerance.
+    max_unknown_codons: int = 0
 
     @property
     def structures(self) -> dict[str, ReadStructure]:
@@ -347,7 +354,8 @@ def tabulate_report(params: AnalysisParams, result: AlignmentResult,
         step(0.88, "Counting haplotypes…")
         hap_df = analysis.haplotype_counts(
             msa, analysis.get_ref_codons(msa, ref_name=REF_NAME), valid_positions,
-            ref_name=REF_NAME)
+            ref_name=REF_NAME,
+            unknown=UNCALLED, max_unknown=params.max_unknown_codons)
 
     calls = ref_calls = None
     if valid_positions:
@@ -358,7 +366,12 @@ def tabulate_report(params: AnalysisParams, result: AlignmentResult,
         ref_calls = analysis.read_codon_calls(ref_only, ref_codons, valid_positions,
                                               ref_name=REF_NAME)["_ref"]
 
-    n_hap = int(hap_df["count"].sum()) if hap_df is not None and not hap_df.empty else None
+    # Independent of the treemap tolerance: this stage always means every codon
+    # read. ``worst`` is the other end - the most any one read is missing.
+    n_hap = (sum(1 for c in calls.values() if all(aa is not None for aa in c))
+             if calls is not None else None)
+    worst = max((sum(aa is None for aa in c) for c in (calls or {}).values()),
+                default=0)
     step(1.0, "Done.")
     return Report(
         target=result.target, params=params, n_reads_kept=len(intact),
@@ -367,4 +380,4 @@ def tabulate_report(params: AnalysisParams, result: AlignmentResult,
         df_aa_freq=df_aa_freq, valid_positions=valid_positions,
         projection=proj, funnel=_build_funnel(params, result, intact, n_hap),
         fates=_build_fates(params, result, calls, ref_calls),
-        hap_df=hap_df, read_map=read_map)
+        hap_df=hap_df, read_map=read_map, max_unknown_codons=worst)

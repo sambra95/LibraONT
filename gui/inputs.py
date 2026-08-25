@@ -100,31 +100,37 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         full = st.checkbox("Use full gene length", value=True,
                            help="Analyse the whole gene. Uncheck to restrict the "
                                 "analysis to a sub-region (e.g. a single domain).")
-        if full:
-            start_pos, stop_pos = 1, max(gene_len, 1)
-        else:
-            c1, c2 = st.columns(2)
-            start_pos = c1.number_input("Start (1-based)", min_value=1,
-                                        max_value=max(gene_len, 1), value=1,
-                                        help="First base of the region of interest "
-                                             "(1-based, inclusive).")
-            stop_pos = c2.number_input("Stop (inclusive)", min_value=1,
-                                       max_value=max(gene_len, 1), value=max(gene_len, 1),
-                                       help="Last base of the region of interest (inclusive).")
+        # Shown either way, but frozen on the whole gene while that box is
+        # ticked - the value has to be written before the widget is built.
+        end = max(gene_len, 1)
+        for key, default in (("roi_start", 1), ("roi_stop", end)):
+            st.session_state[key] = (default if full else
+                                     min(max(st.session_state.get(key, default), 1), end))
+        c1, c2 = st.columns(2)
+        start_pos = c1.number_input("Start (1-based)", min_value=1, max_value=end,
+                                    key="roi_start", disabled=full,
+                                    help="First base of the region of interest "
+                                         "(1-based, inclusive).")
+        stop_pos = c2.number_input("Stop (inclusive)", min_value=1, max_value=end,
+                                   key="roi_stop", disabled=full,
+                                   help="Last base of the region of interest (inclusive).")
 
-        # Length window, defaulted to the range present in the FASTQ.
-        min_read_len = max_read_len = None
+        # Length window, defaulted to the range present in the FASTQ. Shown even
+        # before there is one, so the control does not appear and disappear.
         cached_upload = st.session_state.get("_fastq_upload")
-        if fastq_path and cached_upload:
-            rng = _cached_length_range(fastq_path, cached_upload["key"])
-            if rng and rng[0] < rng[1]:
-                lo, hi = rng
-                min_read_len, max_read_len = st.slider(
-                    "Read length range (bp)", lo, hi, (lo, hi),
-                    help="Only reads whose length falls within this window are kept. "
-                         "Bounds default to the shortest and longest read in the FASTQ.")
-            elif rng:
-                st.caption(f"All reads are {rng[0]} bp long; no length filtering applied.")
+        rng = (_cached_length_range(fastq_path, cached_upload["key"])
+               if fastq_path and cached_upload else None)
+        spread = bool(rng) and rng[0] < rng[1]
+        bounds = rng if spread else (0, 1)
+        window = st.slider(
+            "Read length range (bp)", *bounds, bounds, disabled=not spread,
+            help="Only reads whose length falls within this window are kept. "
+                 "Bounds default to the shortest and longest read in the FASTQ.")
+        min_read_len, max_read_len = window if spread else (None, None)
+        if not spread:
+            st.caption(f"All reads are {rng[0]:,} bp long; no length filtering "
+                       "applies." if rng else
+                       "Upload a FASTQ to filter on read length.")
 
         c_ins, c_del = st.columns(2)
         structural_insertion_bp = c_ins.number_input(
@@ -173,6 +179,22 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                  "everything; ~0.01 suppresses basecall-noise residues.")
         st.caption("Raising this removes real library members as well as noise - "
                    "in a diverse library the individual variant residues are rare.")
+        # Bounded by the worst read of the last run: a higher tolerance than that
+        # cannot admit anything more.
+        worst = getattr(st.session_state.get("report"), "max_unknown_codons", 0)
+        max_unknown_codons = st.slider(
+            "Unknown codons tolerated", 0, worst or 1, 0, disabled=not worst,
+            help="How many diversified codons a read may fail to cover and still "
+                 "appear in the variant treemap; each one it misses is written "
+                 "'?'. A '?' counts as a residue in its own right, so those "
+                 "combinations get their own tiles and count towards the totals. "
+                 "0 keeps only reads called at every position; the top of the "
+                 "range is the most any single read is missing.")
+        if not worst:
+            max_unknown_codons = 0
+            st.caption("Every read either covers all the diversified codons or "
+                       "has none to cover, so there is nothing to tolerate. Run "
+                       "the analysis to size this against your data.")
 
         _tool_status()
         run = st.button("Run analysis", type="primary", use_container_width=True)
@@ -197,5 +219,6 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         structural_insertion_bp=int(structural_insertion_bp),
         structural_deletion_bp=int(structural_deletion_bp),
         pie_positions=positions, pie_min_frac=float(pie_min_frac),
+        max_unknown_codons=int(max_unknown_codons),
         auto_codon_match_pct=float(auto_pct) if auto_pct is not None else None)
     return params, run, None
