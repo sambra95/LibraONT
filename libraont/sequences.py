@@ -16,7 +16,7 @@ def revcomp(seq: str) -> str:
 
 
 def clean_sequence(seq: str) -> str:
-    """Upper-case and keep only A/C/G/T/N (drops whitespace, numbers, etc.)."""
+    """Upper-case, keeping only A/C/G/T/N."""
     return ''.join(c for c in seq.upper() if c in "ACGTN")
 
 
@@ -26,8 +26,7 @@ def collapse_whitespace(seq: str) -> str:
 
 
 def extract_target(gene_seq: str, start_pos: int, stop_pos: int) -> str:
-    """Insert/target region: clean ``gene_seq`` then slice 1-based inclusive
-    ``[start_pos, stop_pos]``."""
+    """Clean ``gene_seq``, then slice 1-based inclusive ``[start_pos, stop_pos]``."""
     return clean_sequence(gene_seq)[start_pos - 1:stop_pos]
 
 
@@ -58,19 +57,21 @@ def read_fastq(path: str) -> Iterator[str]:
         yield seq
 
 
-def read_length_counts(path: str) -> Counter:
-    """Counter mapping read length -> number of reads (supports .gz)."""
+def fastq_stats(path: str) -> tuple[Counter, float | None]:
+    """Single pass over a FASTQ: (length -> count, mean Phred over all bases)."""
     counts: Counter = Counter()
-    for seq in read_fastq(path):
+    total_q = total_b = 0
+    for seq, qual in read_fastq_records(path):
         counts[len(seq)] += 1
-    return counts
+        total_q += sum(ord(c) - 33 for c in qual)
+        total_b += len(qual)
+    return counts, (total_q / total_b if total_b else None)
 
 
 def filter_fastq_by_length(in_path: str, out_path: str, min_len: int | None,
                           max_len: int | None) -> int:
-    """Copy FASTQ records whose sequence length is within ``[min_len, max_len]``
-    (either bound may be ``None``) from ``in_path`` to ``out_path`` (plain text).
-    Preserves headers/qualities; supports gzipped input. Returns the kept count."""
+    """Copy FASTQ records with length in ``[min_len, max_len]`` (either bound may
+    be ``None``) to plain-text ``out_path``. Returns the kept count."""
     kept = 0
     with _open_text(in_path) as fin, open(out_path, "w", encoding="utf-8") as fout:
         while True:
@@ -108,7 +109,7 @@ def read_length_range(path: str) -> tuple[int, int] | None:
 
 
 def write_fasta(seq: str, out_fa: str, name: str = "ref1", width: int = 60) -> str:
-    """Write a single sequence to FASTA (``width`` chars/line). Returns the path."""
+    """Write one sequence to FASTA at ``width`` chars/line; returns the path."""
     s = collapse_whitespace(seq)
     with open(out_fa, "w") as f:
         f.write(f">{name}\n")

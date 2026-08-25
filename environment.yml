@@ -7,7 +7,6 @@ dependencies:
   # External bioinformatics tools (same binaries installed on Streamlit Cloud
   # via packages.txt). conda puts these on PATH so the app resolves them
   # automatically - no path editing needed in the sidebar.
-  - mafft
   - minimap2
   - samtools
   - pip

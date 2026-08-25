@@ -1,14 +1,8 @@
-"""Read orientation/trimming, reference-anchored MSA, and coverage computation.
+"""Read alignment onto reference coordinates, and the whole-plasmid read map.
 
-This module wraps the external tools:
-  * ``edlib`` (Python) for orient + trim,
-  * ``mafft`` for the reference-anchored multiple alignment,
-  * ``minimap2`` + ``samtools`` for whole-plasmid coverage.
-
-External binaries are looked up on ``PATH`` only (:func:`tool_status`) - the
-conda environment in ``environment.yml`` puts them there, exactly as
-``packages.txt`` does on Streamlit Cloud - so the app degrades gracefully when a
-tool is missing rather than crashing.
+Wraps ``edlib`` (locating the insert), ``minimap2`` (aligning reads) and
+``samtools`` (sorting/reading the plasmid alignments). Binaries are looked up on
+``PATH`` only, so a missing tool degrades rather than crashes.
 """
 
 from __future__ import annotations
@@ -16,19 +10,24 @@ from __future__ import annotations
 import functools
 import os
 import re
+import math
 import shutil
 import subprocess
 import tempfile
-import textwrap
 from dataclasses import dataclass, field
 
 import edlib
 import numpy as np
 
-from .sequences import (filter_fastq_by_length, read_fastq_records, revcomp,
-                        write_fasta, collapse_whitespace)
+from .sequences import (collapse_whitespace, filter_fastq_by_length, revcomp,
+                        write_fasta)
 
-TOOLS = ("mafft", "minimap2", "samtools")
+TOOLS = ("minimap2", "samtools")
+
+# Fraction of the insert a read must cover before its assembly can be judged.
+SPANNING_MIN_COVER = 0.95
+# Rows drawn on the read map; beyond this the pileup outruns the panel's pixels.
+MAX_MAP_READS = 2000
 
 
 def tool_status() -> dict[str, str | None]:
@@ -38,15 +37,11 @@ def tool_status() -> dict[str, str | None]:
 
 @functools.lru_cache(maxsize=None)
 def _tool_version(name: str, path: str | None) -> str | None:
-    """Concise version string for a resolved tool (None if unresolved).
-
-    Cached by resolved path so the tool isn't re-run on every Streamlit rerun.
-    """
+    """Version string for a resolved tool, cached so Streamlit reruns are free."""
     if not path:
         return None
     try:
-        # utf-8/replace, not the locale default: a C/ASCII-locale host would
-        # raise UnicodeDecodeError on samtools' non-ASCII banner bytes.
+        # utf-8/replace: a C-locale host chokes on samtools' non-ASCII banner.
         proc = subprocess.run([path, "--version"], stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, encoding="utf-8",
                               errors="replace", timeout=20)
@@ -66,151 +61,264 @@ def tool_versions() -> dict[str, str | None]:
     return {name: _tool_version(name, path) for name, path in tool_status().items()}
 
 
-# --- Orientation + trimming -------------------------------------------------
-_EDLIB_CIGAR_RE = re.compile(r"(\d+)([=XID])")
+# CIGAR ops by what they consume: reference span, and alignment columns (the
+# denominator for BLAST-style identity).
+_CIGAR_RE = re.compile(r"(\d+)([MIDNSHP=X])")
+_REF_CONSUMING = frozenset("MDN=X")
+_ALN_COLUMNS = frozenset("MIDN=X")
 
 
-def _overlap_identity(cigar: str) -> float:
-    """Identity over the overlapping region of an edlib HW alignment (query = the
-    reference insert). Terminal ``I`` runs - insert bases the read does not reach -
-    are excluded, so a truncated but accurate read is scored only on the portion it
-    covers, not penalised for partial coverage.
+# --- Locating the insert inside a larger reference ---------------------------
+def locate_insert(reference: str, insert: str) -> dict | None:
+    """1-based inclusive span of ``insert`` within ``reference`` (either strand).
+
+    Approximate, not a substring search: a supplied gene routinely differs from
+    the plasmid's copy of it by a few bases.
     """
-    ops = [(int(n), op) for n, op in _EDLIB_CIGAR_RE.findall(cigar)]
-    while ops and ops[0][1] == "I":
-        ops.pop(0)
-    while ops and ops[-1][1] == "I":
-        ops.pop()
-    matches = sum(n for n, op in ops if op == "=")
-    columns = sum(n for n, op in ops)
-    return matches / columns if columns else 0.0
+    ref = collapse_whitespace(reference).upper()
+    query = collapse_whitespace(insert).upper()
+    if not ref or not query:
+        return None
+    hits = []
+    for strand, q in (("+", query), ("-", revcomp(query))):
+        res = edlib.align(q, ref, mode="HW", task="locations")
+        if res["locations"]:
+            hits.append((res["editDistance"], strand, res["locations"][0]))
+    if not hits:
+        return None
+    distance, strand, (start, end) = min(hits)
+    if distance > 0.25 * len(query):     # too poor to be this insert at all
+        return None
+    return {"start": start + 1, "end": end + 1, "strand": strand,
+            "mismatches": distance}
 
 
-def edlib_orient_trim_and_quality(fastq_path: str, target: str, min_identity: float = 0.65,
-                                  pad: int = 200, drop_short: bool = True,
-                                  min_read_len: int | None = None,
-                                  max_read_len: int | None = None,
-                                  ) -> tuple[list[tuple[str, str]], float | None]:
-    """For each read: find the best strand/placement vs ``target`` (edlib HW),
-    trim to ``[start-pad : end+1+pad]`` on that strand, and keep it only if its
-    identity over the overlapping region (see :func:`_overlap_identity`) is
-    >= ``min_identity`` - partial coverage of the insert is not penalised.
-
-    Reads whose raw length falls outside ``[min_read_len, max_read_len]`` are
-    skipped (either bound may be ``None`` to disable it).
-
-    Returns kept sequences plus the mean Phred score across kept full reads.
-    """
-    L = len(target)
-    out: list[tuple[str, str]] = [("REF", target)]
-    total_phred = 0
-    total_bases = 0
-    for i, (seq, qual) in enumerate(read_fastq_records(fastq_path), 1):
-        r = seq.strip().upper()
-        if not r:
-            continue
-        if min_read_len is not None and len(r) < min_read_len:
-            continue
-        if max_read_len is not None and len(r) > max_read_len:
-            continue
-
-        rf = edlib.align(target, r, task="path", mode="HW")
-        rr = edlib.align(target, revcomp(r), task="path", mode="HW")
-        use_rev = rr["editDistance"] < rf["editDistance"]
-        res = rr if use_rev else rf
-        if not res["locations"]:
-            continue
-        if _overlap_identity(res["cigar"]) < min_identity:
-            continue
-
-        rseq = revcomp(r) if use_rev else r
-        start, end = res["locations"][0]  # edlib end is inclusive
-        trimmed = rseq[max(0, start - pad):min(len(rseq), end + 1 + pad)]
-        if drop_short and len(trimmed) < max(50, L // 4):
-            continue
-
-        out.append((f"read_{i}", trimmed))
-        total_phred += sum(ord(ch) - 33 for ch in qual)
-        total_bases += len(qual)
-    mean_phred = total_phred / total_bases if total_bases else None
-    return out, mean_phred
-
-
-# --- Reference-anchored MAFFT alignment -------------------------------------
-def _parse_fasta(text: str) -> dict[str, str]:
-    out: dict[str, str] = {}
-    name, buf = None, []
-    for line in text.splitlines():
-        if line.startswith(">"):
-            if name is not None:
-                out[name] = "".join(buf)
-            name, buf = line[1:].strip(), []
-        else:
-            buf.append(line.strip())
-    if name is not None:
-        out[name] = "".join(buf)
-    return out
-
-
-def run_msa_mafft(seqs_named: list[tuple[str, str]], mafft_bin: str = "mafft", threads: int = 1,
-                  op: float = 3.5, ep: float = 1.0, extra_args: list[str] | None = None,
-                  batch_size: int = 300) -> dict[str, str]:
-    """Reference-anchored alignment in batches: build a REF-only backbone, then add
-    fragments per batch with ``mafft --addfragments --keeplength`` and merge the
-    rows (REF is identical across batches)."""
-    if extra_args is None:
-        extra_args = ["--localpair", "--maxiterate", "1000", "--quiet"]
-    assert seqs_named and seqs_named[0][0] == "REF", "first entry must be ('REF', ...)"
-    ref_name, ref_seq = seqs_named[0]
-    reads = seqs_named[1:]
-
-    def run_batch(backbone_fa: str, batch_reads: list[tuple[str, str]]) -> dict[str, str]:
-        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".fa") as rfa:
-            for n, s in batch_reads:
-                rfa.write(f">{n}\n{textwrap.fill(s, 80)}\n")
-            rfa_name = rfa.name
-        cmd = [mafft_bin, "--thread", str(threads), "--addfragments", rfa_name,
-               "--keeplength", "--anysymbol", "--op", str(op), "--ep", str(ep),
-               *extra_args, backbone_fa]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              encoding="utf-8", errors="replace")
-        os.unlink(rfa_name)
-        if proc.returncode != 0 or not proc.stdout.strip():
-            raise RuntimeError(f"MAFFT addfragments failed.\nCMD: {' '.join(cmd)}\n"
-                               f"STDERR:\n{proc.stderr}")
-        return _parse_fasta(proc.stdout)
-
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".fa") as bfa:
-        bfa.write(f">{ref_name}\n{textwrap.fill(ref_seq, 80)}\n")
-        backbone_fa = bfa.name
-
-    msa: dict[str, str] = {}
-    L = 0
-    try:
-        for i in range(0, len(reads), batch_size):
-            batch = reads[i:i + batch_size]
-            out = run_batch(backbone_fa, batch)
-            if not msa:
-                msa[ref_name] = out[ref_name]
-                L = len(msa[ref_name])
-            elif len(out[ref_name]) != L:
-                raise ValueError("Backbone length changed across batches.")
-            for n, _ in batch:
-                # MAFFT can drop too-short / no-hit fragments; treat as all gaps.
-                msa[n] = out.get(n, "-" * L)
-    finally:
-        os.unlink(backbone_fa)
-
-    if len({len(s) for s in msa.values()}) != 1:
-        raise ValueError("Merged MSA rows are not equal length.")
-    return msa
-
-
-# --- Whole-plasmid coverage (minimap2 + samtools) ---------------------------
+# --- Reference-anchored projection of read alignments ------------------------
 @dataclass
-class CoverageResult:
-    positions: np.ndarray
-    fractions: np.ndarray
+class ReadStructure:
+    """Structural summary of one read's primary alignment over the insert."""
+    name: str
+    reverse: bool
+    ref_start: int              # 1-based inclusive, insert coordinates
+    ref_end: int
+    identity: float
+    insertions: list[tuple[int, int]] = field(default_factory=list)  # (pos, length)
+    deletions: list[tuple[int, int]] = field(default_factory=list)
+
+    @property
+    def max_insertion(self) -> int:
+        return max((n for _, n in self.insertions), default=0)
+
+    @property
+    def max_deletion(self) -> int:
+        return max((n for _, n in self.deletions), default=0)
+
+    @property
+    def net_length_change(self) -> int:
+        return sum(n for _, n in self.insertions) - sum(n for _, n in self.deletions)
+
+    @property
+    def covered(self) -> int:
+        return self.ref_end - self.ref_start + 1
+
+    def is_intact(self, insertion_bp: int, deletion_bp: int) -> bool:
+        """True when neither indel direction reaches its structural threshold."""
+        return self.max_insertion < insertion_bp and self.max_deletion < deletion_bp
+
+    def classify(self, insertion_bp: int, deletion_bp: int) -> str:
+        """intact / insertion / deletion, split by reading-frame effect. A read
+        breaching both thresholds is named for its larger indel."""
+        if self.is_intact(insertion_bp, deletion_bp):
+            return "intact"
+        ins = self.max_insertion if self.max_insertion >= insertion_bp else 0
+        dele = self.max_deletion if self.max_deletion >= deletion_bp else 0
+        kind = "insertion" if ins >= dele else "deletion"
+        return f"{kind} ({'in-frame' if self.net_length_change % 3 == 0 else 'frameshift'})"
+
+
+@dataclass
+class Projection:
+    """Reads projected onto insert coordinates, plus what was filtered on the way.
+
+    ``rows`` maps read name -> a string of ``len(insert)`` characters, '-' where
+    the read does not cover that base.
+    """
+    insert: str
+    rows: dict[str, str]
+    structures: dict[str, ReadStructure]
+    n_input: int
+    n_length_kept: int
+    n_mapped: int
+    n_unaligned: int = 0        # no alignment at all: contaminant, not library
+    n_off_target: int = 0       # crosses a junction but carries no insert: empty vector
+    n_uninformative: int = 0    # aligned elsewhere on the plasmid: says nothing
+    region: dict | None = None          # insert span on the alignment reference
+
+    @property
+    def n_aligned(self) -> int:
+        """Reads with any alignment to the reference."""
+        return self.n_mapped + self.n_off_target + self.n_uninformative
+
+    @property
+    def n_informative(self) -> int:
+        """Reads that say something about the insert: they carry part of it, or
+        cross a vector-insert junction without it. The analysed population."""
+        return self.n_mapped + self.n_off_target
+
+    def spanning_names(self, min_cover: float = SPANNING_MIN_COVER) -> list[str]:
+        """Reads covering at least ``min_cover`` of the insert - the only ones
+        whose assembly can be judged, since a shorter read hides any defect
+        outside its span."""
+        need = min_cover * len(self.insert)
+        return [n for n, st in self.structures.items() if st.covered >= need]
+
+    def intact_names(self, insertion_bp: int, deletion_bp: int) -> list[str]:
+        """Reads carrying no structural indel. Not screened on identity: that
+        falls as a clone carries more changes, so it would select against the
+        most diverse library members."""
+        return [n for n, st in self.structures.items()
+                if st.is_intact(insertion_bp, deletion_bp)]
+
+
+def _sam_records(minimap2_bin: str, ref_fasta: str, fastq: str, threads: int,
+                 preset: str = "map-ont"):
+    """Split SAM fields for every non-secondary record - unmapped and
+    supplementary included, for the caller to count and to span-check."""
+    proc = subprocess.Popen(
+        [minimap2_bin, "-x", preset, "-a", "-t", str(threads), "--secondary=no",
+         ref_fasta, fastq],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, encoding="utf-8",
+        errors="replace")
+    for line in proc.stdout:
+        if line.startswith("@"):
+            continue
+        f = line.rstrip("\n").split("\t")
+        if len(f) < 11:
+            continue
+        flag = int(f[1])
+        if flag & 0x100:          # secondary
+            continue
+        yield f, flag
+    proc.stdout.close()
+    if proc.wait() != 0:
+        raise RuntimeError("minimap2 alignment failed.")
+
+
+def project_reads(insert: str, fastq_path: str, minimap2_bin: str,
+                  reference_seq: str | None = None, threads: int = 4,
+                  min_read_len: int | None = None, max_read_len: int | None = None,
+                  n_input: int = 0) -> Projection:
+    """Align reads and project each onto insert coordinates, keeping indels.
+
+    Reads map to ``reference_seq`` (the whole plasmid) when given, else to the
+    insert. The larger reference matters: aligned to the insert alone, a read
+    extending past it is split, hiding the insertions this exists to measure.
+    """
+    insert = collapse_whitespace(insert).upper()
+    workdir = tempfile.mkdtemp(prefix="libraont_aln_")
+    try:
+        ref_seq = collapse_whitespace(reference_seq).upper() if reference_seq else insert
+        region = locate_insert(ref_seq, insert) if reference_seq else {
+            "start": 1, "end": len(insert), "strand": "+", "mismatches": 0}
+        if region is None:                       # insert not found in the plasmid
+            ref_seq, region = insert, {"start": 1, "end": len(insert),
+                                       "strand": "+", "mismatches": 0}
+        ref_fasta = write_fasta(ref_seq, os.path.join(workdir, "reference.fa"), name="ref1")
+
+        reads_in = fastq_path
+        n_length_kept = n_input
+        if min_read_len is not None or max_read_len is not None:
+            reads_in = os.path.join(workdir, "length_filtered.fastq")
+            n_length_kept = filter_fastq_by_length(fastq_path, reads_in,
+                                                   min_read_len, max_read_len)
+
+        lo, hi = region["start"], region["end"]
+        flip = region["strand"] == "-"
+        width = hi - lo + 1
+        rows: dict[str, str] = {}
+        structures: dict[str, ReadStructure] = {}
+        unaligned = 0
+        # A read carrying no insert bases only means "insert missing" if it
+        # actually crosses a vector-insert junction; one aligned elsewhere on the
+        # plasmid says nothing either way. Junction-crossing is judged over all
+        # of a read's segments, since minimap2 splits a deletion this large.
+        segments: dict[str, list[tuple[int, int]]] = {}
+        no_insert: list[str] = []
+
+        for f, flag in _sam_records(minimap2_bin, ref_fasta, reads_in, threads):
+            if flag & 0x4 or f[5] == "*":     # contaminant: no alignment at all
+                unaligned += 1
+                continue
+            name, pos, seq = f[0], int(f[3]), f[9]
+            ops = [(int(n), op) for n, op in _CIGAR_RE.findall(f[5])]
+            span = sum(n for n, op in ops if op in _REF_CONSUMING)
+            segments.setdefault(name, []).append((pos, pos + span - 1))
+            if flag & 0x800:                  # supplementary: span only
+                continue
+            row = ["-"] * width
+            ins: list[tuple[int, int]] = []
+            dels: list[tuple[int, int]] = []
+            ref, q = pos, 0
+            for n, op in ops:
+                if op in "M=X":
+                    a, b = max(ref, lo), min(ref + n - 1, hi)
+                    if a <= b:
+                        row[a - lo:b - lo + 1] = seq[q + a - ref:q + b - ref + 1]
+                    ref += n
+                    q += n
+                elif op == "I":
+                    # Point event between ref-1 and ref; hi + 1 is the 3' junction.
+                    if lo <= ref <= hi + 1:
+                        ins.append((min(ref, hi) - lo + 1, n))
+                    q += n
+                elif op in "DN":
+                    # Overlap, not start-inside: a deletion spanning the whole
+                    # insert begins one base before it and would be missed.
+                    a, b = max(ref, lo), min(ref + n - 1, hi)
+                    if a <= b:
+                        dels.append((a - lo + 1, b - a + 1))
+                    ref += n
+                elif op == "S":
+                    q += n
+
+            projected = "".join(row).upper()
+            start = width - len(projected.lstrip("-"))
+            end = len(projected.rstrip("-")) - 1
+            if end < start:            # no insert bases; resolved after the loop
+                no_insert.append(name)
+                continue
+            columns = sum(n for n, op in ops if op in _ALN_COLUMNS)
+            nm = next((int(t[5:]) for t in f[11:] if t.startswith("NM:i:")), None)
+            identity = 1.0 - nm / columns if (nm is not None and columns > 0) else float("nan")
+            start, end = start + 1, end + 1
+            if flip:                     # insert lies on the reverse strand
+                projected = revcomp(projected)
+                start, end = width - end + 1, width - start + 1
+                ins = [(width - p + 1, n) for p, n in ins]
+                dels = [(width - p + 1, n) for p, n in dels]
+            rows[name] = projected
+            structures[name] = ReadStructure(
+                name=name, reverse=bool(flag & 0x10) != flip, ref_start=start,
+                ref_end=end, identity=identity, insertions=ins, deletions=dels)
+
+        def crosses_junction(name: str) -> bool:
+            return any(s < lo <= e or s <= hi < e
+                       for s, e in segments.get(name, ()))
+
+        off_target = sum(1 for name in no_insert if crosses_junction(name))
+        return Projection(insert=insert, rows=rows, structures=structures,
+                          n_input=n_input or len(rows), n_length_kept=n_length_kept,
+                          n_mapped=len(rows), n_off_target=off_target,
+                          n_uninformative=len(no_insert) - off_target,
+                          n_unaligned=unaligned, region=region)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+# --- Whole-plasmid read map (minimap2 + samtools) ---------------------------
+@dataclass
+class ReadMap:
+    """Per-read alignment of a read set to a reference contig."""
     mapped_reads: int
     contig: str
     region: dict | None = None  # {'start','end','strand'} or None
@@ -219,6 +327,25 @@ class CoverageResult:
     read_starts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     read_ends: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     read_identities: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=float))
+    # Per-read, per-contig-base agreement with the reference, row-aligned to the
+    # arrays above: 0 = not covered, 1 = matches, 2 = substituted, 3 = deleted.
+    # uint8 keeps a deep pileup over a whole plasmid cheap to hold and to draw.
+    # Insertions are absent here by design - they occupy no reference base, so
+    # they live only in the sparse records below.
+    match_matrix: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.uint8))
+    # Indels as sparse triples - which kept row, where on the contig, how many
+    # bases - so their size survives, which a per-base matrix cannot carry, and
+    # so the plot can apply a size threshold without losing the underlying data.
+    insertion_rows: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    insertion_positions: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    insertion_lengths: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    deletion_rows: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    deletion_positions: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    deletion_lengths: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
+    # Per-base tallies over *every* mapped read, not just the rows kept for the
+    # map, so the agreement trace stays exact however deep the pileup gets.
+    match_counts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    depth_counts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
     contig_length: int = 0
 
 
@@ -228,46 +355,89 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
                           encoding="utf-8", errors="replace", check=True, **kw)
 
 
-# CIGAR operations by what they consume: reference span (a read's footprint on
-# the contig) and alignment columns (the denominator for BLAST-style identity).
-_CIGAR_RE = re.compile(r"(\d+)([MIDNSHP=X])")
-_REF_CONSUMING = frozenset("MDN=X")
-_ALN_COLUMNS = frozenset("MIDN=X")
+def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
+                    contig_length: int, max_rows: int = 0
+                    ) -> tuple[np.ndarray, ...]:
+    """Per-read (start, end, identity, per-base agreement) on ``contig``.
 
+    Positions are 1-based inclusive; identity is ``1 - NM/aligned_columns``
+    (``nan`` without an ``NM`` tag). The agreement matrix codes each base 0 (not
+    covered), 1 (match), 2 (substituted) or 3 (deleted); indels also come back
+    as sparse (row, position, length) triples, since a per-base matrix carries
+    no length and an insertion has no base of its own.
 
-def _read_intervals(samtools: str, bam: str, contig: str
-                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Per-read (start, end, identity) for primary alignments to ``contig``.
-
-    Excludes unmapped/secondary/supplementary records (``-F 0x904``). Positions
-    are 1-based inclusive on the contig; identity is BLAST-style
-    ``1 - NM/aligned_columns`` (``nan`` when the ``NM`` tag is absent).
+    ``max_rows`` caps the rows kept for the map, sampled evenly; the per-base
+    tallies still cover every read, so the agreement trace is never a sample.
     """
     view = _run([samtools, "view", "-F", "0x904", bam, contig])
-    starts, ends, idents = [], [], []
-    for line in view.stdout.splitlines():
+    lines = [ln for ln in view.stdout.splitlines() if ln]
+    step = math.ceil(len(lines) / max_rows) if max_rows and len(lines) > max_rows else 1
+
+    ref = np.frombuffer(contig_seq.upper().encode(), dtype="S1")
+    match_counts = np.zeros(contig_length, dtype=np.int64)
+    depth_counts = np.zeros(contig_length, dtype=np.int64)
+    starts, ends, idents, rows = [], [], [], []
+    ins_records: tuple[list, list, list] = ([], [], [])
+    del_records: tuple[list, list, list] = ([], [], [])
+    for index, line in enumerate(lines):
         f = line.split("\t")
-        if len(f) < 6:
+        if len(f) < 11:
             continue
         cigar = f[5]
         if cigar == "*":
             continue
-        ref_span = columns = 0
-        for n, op in _CIGAR_RE.findall(cigar):
-            length = int(n)
-            if op in _REF_CONSUMING:
-                ref_span += length
-            if op in _ALN_COLUMNS:
-                columns += length
+        ops = [(int(n), op) for n, op in _CIGAR_RE.findall(cigar)]
+        ref_span = sum(n for n, op in ops if op in _REF_CONSUMING)
+        columns = sum(n for n, op in ops if op in _ALN_COLUMNS)
         if ref_span <= 0:
             continue
         pos = int(f[3])
+        seq = f[9]
+        row = np.zeros(contig_length, dtype=np.uint8)
+        insertions: list[tuple[int, int]] = []
+        deletions: list[tuple[int, int]] = []
+        r = pos - 1          # 0-based cursor on the contig
+        q = 0                # cursor in the read
+        for n, op in ops:
+            if op in "M=X":
+                lo, hi = r, min(r + n, contig_length)
+                if hi > lo:
+                    read_seg = np.frombuffer(seq[q:q + (hi - lo)].upper().encode(),
+                                             dtype="S1")
+                    row[lo:hi] = np.where(read_seg == ref[lo:hi], 1, 2)
+                r += n
+                q += n
+            elif op in "DN":
+                if 0 <= r < contig_length:
+                    deletions.append((r, n))
+                row[r:min(r + n, contig_length)] = 3
+                r += n
+            elif op == "I":
+                if 0 <= r < contig_length:
+                    insertions.append((r, n))
+                q += n
+            elif op == "S":
+                q += n
+        match_counts += (row == 1)
+        depth_counts += (row > 0)
+        if index % step:
+            continue
+        for store, events in ((ins_records, insertions), (del_records, deletions)):
+            for at, length in events:
+                store[0].append(len(rows))
+                store[1].append(at + 1)
+                store[2].append(length)
         starts.append(pos)
         ends.append(pos + ref_span - 1)
         nm = next((int(t[5:]) for t in f[11:] if t.startswith("NM:i:")), None)
         idents.append(1.0 - nm / columns if (nm is not None and columns > 0) else np.nan)
+        rows.append(row)
+    matrix = (np.vstack(rows) if rows
+              else np.empty((0, contig_length), dtype=np.uint8))
     return (np.asarray(starts, dtype=int), np.asarray(ends, dtype=int),
-            np.asarray(idents, dtype=float))
+            np.asarray(idents, dtype=float), matrix, match_counts, depth_counts,
+            *(np.asarray(a, dtype=int) for a in ins_records),
+            *(np.asarray(a, dtype=int) for a in del_records))
 
 
 def _fetch_contig_seq(samtools: str, ref_fasta: str, contig: str) -> str:
@@ -276,16 +446,17 @@ def _fetch_contig_seq(samtools: str, ref_fasta: str, contig: str) -> str:
     return "".join(ln.strip() for ln in p.stdout.splitlines() if ln and not ln.startswith(">"))
 
 
-def compute_coverage(reference_seq: str, fastq_in: str, inner_seq: str | None,
-                     minimap2_bin: str, samtools_bin: str, threads: int = 4,
-                     allow_revcomp: bool = True, min_read_len: int | None = None,
-                     max_read_len: int | None = None) -> CoverageResult:
+def map_reads_to_reference(reference_seq: str, fastq_in: str, inner_seq: str | None,
+                           minimap2_bin: str, samtools_bin: str, threads: int = 4,
+                           min_read_len: int | None = None,
+                           max_read_len: int | None = None,
+                           max_map_reads: int = MAX_MAP_READS) -> ReadMap:
     """Align reads to ``reference_seq`` (minimap2 -> sorted/indexed BAM via
-    samtools), then return per-base coverage as a fraction of max depth, plus an
-    optional exact-match highlight for ``inner_seq`` (forward or reverse complement).
+    samtools) and return where each one sits and how it agrees with the
+    reference, plus an optional highlight for ``inner_seq`` (either strand).
 
     When ``min_read_len``/``max_read_len`` are set, only reads whose length is in
-    that window are mapped, so the coverage and per-read map reflect the same
+    that window are mapped, so the read map reflects the same
     length-filtered dataset used by the rest of the analysis."""
     workdir = tempfile.mkdtemp(prefix="libraont_cov_")
     ref_fasta = write_fasta(reference_seq, os.path.join(workdir, "reference.fa"), name="ref1")
@@ -314,36 +485,33 @@ def compute_coverage(reference_seq: str, fastq_in: str, inner_seq: str | None,
     if not contigs:
         raise RuntimeError("No valid contigs found in BAM index.")
     contigs.sort(key=lambda x: x[2], reverse=True)
-    contig, contig_length, mapped_reads = contigs[0]
+    contig, contig_length, _ = contigs[0]
+    # idxstats counts alignment *records*; supplementary alignments would make a
+    # circular plasmid look like it had twice as many reads as the FASTQ holds.
+    mapped_reads = int(_run([samtools_bin, "view", "-c", "-F", "0x904", bam, contig])
+                       .stdout.strip() or 0)
 
-    depth = _run([samtools_bin, "depth", "-d", "0", "-r", contig, bam])
-    if not depth.stdout.strip():
-        raise RuntimeError(f"samtools depth produced no output for contig '{contig}'.")
-    pos, dep = [], []
-    for line in depth.stdout.strip().splitlines():
-        _, p, d = line.split("\t")
-        pos.append(int(p))
-        dep.append(int(d))
-    positions = np.asarray(pos, dtype=float)
-    depths = np.asarray(dep, dtype=float)
-    max_cov = depths.max() if depths.size else 0
-    fractions = depths / max_cov if max_cov > 0 else depths
-
+    contig_seq = ""
     region = None
     if inner_seq:
+        # edlib, not an exact search: the supplied gene is routinely a few bases
+        # different from the plasmid's copy of it, which would silently lose the
+        # insert marker.
         contig_seq = _fetch_contig_seq(samtools_bin, ref_fasta, contig).upper()
-        q = collapse_whitespace(inner_seq).upper()
-        hit, strand = contig_seq.find(q), "+"
-        if hit == -1 and allow_revcomp:
-            hit = contig_seq.find(revcomp(q))
-            if hit != -1:
-                strand = "-"
-        if hit != -1:
-            region = {"start": hit + 1, "end": hit + len(q), "strand": strand}
+        region = locate_insert(contig_seq, inner_seq)
 
-    read_starts, read_ends, read_idents = _read_intervals(samtools_bin, bam, contig)
+    if not contig_seq:
+        contig_seq = _fetch_contig_seq(samtools_bin, ref_fasta, contig).upper()
+    (read_starts, read_ends, read_idents, match_matrix, match_counts, depth_counts,
+     ins_rows, ins_pos, ins_len, del_rows, del_pos, del_len) = _read_intervals(
+        samtools_bin, bam, contig, contig_seq, contig_length, max_rows=max_map_reads)
 
     shutil.rmtree(workdir, ignore_errors=True)
-    return CoverageResult(positions, fractions, mapped_reads, contig, region,
+    return ReadMap(mapped_reads, contig, region,
                           read_starts=read_starts, read_ends=read_ends,
-                          read_identities=read_idents, contig_length=contig_length)
+                          read_identities=read_idents, match_matrix=match_matrix,
+                          match_counts=match_counts, depth_counts=depth_counts,
+                          insertion_rows=ins_rows, insertion_positions=ins_pos,
+                          insertion_lengths=ins_len, deletion_rows=del_rows,
+                          deletion_positions=del_pos, deletion_lengths=del_len,
+                          contig_length=contig_length)

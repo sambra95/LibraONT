@@ -8,8 +8,8 @@ import tempfile
 import streamlit as st
 
 from libraont import alignment
-from libraont.constants import (DEFAULT_MIN_IDENTITY, DEFAULT_PAD,
-                                DEFAULT_PIE_MIN_FRAC)
+from libraont.constants import (DEFAULT_PIE_MIN_FRAC, DEFAULT_STRUCTURAL_DELETION_BP,
+                                DEFAULT_STRUCTURAL_INSERTION_BP)
 from libraont.pipeline import AnalysisParams
 from libraont.sequences import clean_sequence, read_length_range
 
@@ -20,23 +20,19 @@ def _cached_length_range(path: str, key: tuple) -> tuple[int, int] | None:
     return read_length_range(path)
 
 
-_TOOL_LABELS = {"mafft": "MAFFT", "minimap2": "minimap2", "samtools": "samtools"}
+_TOOL_LABELS = {"minimap2": "minimap2", "samtools": "samtools"}
 
 _TOOL_DESCRIPTIONS = {
-    "mafft": "Reference-anchored multiple alignment of the reads - the backbone for "
-             "base/AA composition, variable-codon detection and the variant treemap.",
-    "minimap2": "Maps reads to the whole plasmid (ONT preset) for the coverage plot.",
-    "samtools": "Sorts and indexes the minimap2 alignments and computes per-base depth "
-                "for the coverage plot.",
+    "minimap2": "Required. Aligns every read and keeps the insertions it carries - the "
+                "basis for read structure, base/AA composition and the variant treemap.",
+    "samtools": "Optional. Sorts and indexes the plasmid alignments behind the "
+                "read alignment map.",
 }
 
 
 def _resolve_fastq() -> tuple[str | None, str | None]:
-    """Return a readable path and original filename for the single uploaded FASTQ.
-
-    Only one file may be uploaded; uploading a new one replaces the previous -
-    its temp copy is deleted first so a stale FASTQ never lingers on disk.
-    """
+    """Path and original filename for the uploaded FASTQ. A new upload replaces
+    the previous one, deleting its temp copy first."""
     upload = st.file_uploader(
         "FASTQ file", type=["fastq", "fq", "gz"], accept_multiple_files=False,
         help="Upload a single nanopore read set (.fastq or .fastq.gz). "
@@ -44,8 +40,8 @@ def _resolve_fastq() -> tuple[str | None, str | None]:
     if upload is None:
         return None, None
 
-    # Persist the upload to one temp file, reused across reruns. A different
-    # upload (by name/size) overwrites it; the old temp file is removed first.
+    # One temp file, reused across reruns; a different upload (by name/size)
+    # replaces it.
     cached = st.session_state.get("_fastq_upload")
     key = (upload.name, upload.size)
     if not cached or cached["key"] != key:
@@ -92,9 +88,9 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         gene_seq = st.text_area("Gene sequence", height=120,
                                 help="Original gene (A/C/G/T/N, case-insensitive).")
         plasmid_seq = st.text_area("Plasmid sequence (optional)", height=80,
-                                   help="Full plasmid; enables the coverage plot. Must "
+                                   help="Full plasmid; enables the read alignment map. Must "
                                         "include the target/gene sequence, which is located "
-                                        "within the plasmid to place it on the coverage plot.")
+                                        "within the plasmid to place it on the map.")
 
         gene_len = len(clean_sequence(gene_seq)) if gene_seq else 0
 
@@ -116,13 +112,7 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                                        max_value=max(gene_len, 1), value=max(gene_len, 1),
                                        help="Last base of the region of interest (inclusive).")
 
-        pad = st.number_input("Padding (bp)", min_value=0, value=DEFAULT_PAD, step=10,
-                              help="Extra bases kept on each side of the matched region "
-                                   "when trimming each read. Increase to retain flanks.")
-
-        # Read-length window, bounded and defaulted to the range actually present
-        # in the uploaded FASTQ. Reads outside the selected window are discarded
-        # before alignment.
+        # Length window, defaulted to the range present in the FASTQ.
         min_read_len = max_read_len = None
         cached_upload = st.session_state.get("_fastq_upload")
         if fastq_path and cached_upload:
@@ -136,20 +126,27 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
             elif rng:
                 st.caption(f"All reads are {rng[0]} bp long; no length filtering applied.")
 
+        c_ins, c_del = st.columns(2)
+        structural_insertion_bp = c_ins.number_input(
+            "Insertion threshold (bp)", min_value=1, max_value=500,
+            value=DEFAULT_STRUCTURAL_INSERTION_BP, step=1,
+            help="A read carrying an insertion at least this large is treated as "
+                 "mis-assembled and excluded from every composition plot.")
+        structural_deletion_bp = c_del.number_input(
+            "Deletion threshold (bp)", min_value=1, max_value=500,
+            value=DEFAULT_STRUCTURAL_DELETION_BP, step=1,
+            help="As above, for deletions - set apart from the insertion "
+                 "threshold because a library can fail one way without the other.")
+        st.caption("Separate these from basecall noise: ONT indel errors are 1-9 bp "
+                   "and real rearrangements are much larger, so anything in ~10-25 bp "
+                   "behaves the same. Reads under both are the 'correctly assembled' "
+                   "fraction.")
+
         st.subheader("Library Analysis settings")
         st.caption("Adjust the analysis and how results are displayed. The identity "
                    "filter re-runs the alignment; codon/pie settings update instantly. "
                    "Codon selection drives the AA-distribution pies and variant treemap "
                    "(and marks a cutoff on the alignment plot).")
-        min_identity = st.slider(
-            "Minimum identity", 0.0, 1.0, DEFAULT_MIN_IDENTITY, 0.01,
-            help="Minimum identity to the reference insert. Reads that don't align to the "
-                 "insert at or above this are discarded - this is the filter behind the "
-                 "'Alignment to reference insert' plot, and it sets the reads used across "
-                 "the analysis (AA distribution and variant treemap too). Lower it if too "
-                 "few reads pass.")
-        st.caption("Read-level filter: fraction of each read that must match the "
-                   "reference insert for the read to be kept.")
         auto_detect = st.toggle(
             "Auto-detect variable codons", value=True,
             help="Use reference-match % to select codons automatically.")
@@ -167,16 +164,15 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
             positions_text = st.text_input(
                 "Codon positions", placeholder="e.g. 16, 129, 231",
                 help="1-based codon positions for AA pies & haplotypes.")
-        pie_min_frac = st.number_input("Grouping threshold", min_value=0.0, max_value=1.0,
-                                       value=DEFAULT_PIE_MIN_FRAC, step=0.01,
-                                       help="AA-distribution plot only: amino acids below "
-                                            "this frequency are folded into a single "
-                                            "'Other' slice.")
-        include_rare_variants = st.toggle(
-            "Include rare variants", value=False,
-            help="Variant treemap only: when off, variants containing an amino acid below the "
-                 "grouping threshold at its codon position (an 'Other' residue) are excluded, "
-                 "and the treemap stats reflect the remaining variants.")
+        pie_min_frac = st.number_input(
+            "Grouping threshold", min_value=0.0, max_value=1.0,
+            value=DEFAULT_PIE_MIN_FRAC, step=0.01, format="%.3f",
+            help="Amino acids below this frequency at their codon are folded into "
+                 "one 'Other' slice in the AA distribution, and variants carrying "
+                 "such a residue are dropped from the variant treemap. 0 keeps "
+                 "everything; ~0.01 suppresses basecall-noise residues.")
+        st.caption("Raising this removes real library members as well as noise - "
+                   "in a diverse library the individual variant residues are rare.")
 
         _tool_status()
         run = st.button("Run analysis", type="primary", use_container_width=True)
@@ -195,11 +191,11 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         fastq_path=fastq_path, gene_seq=gene_seq,
         start_pos=int(start_pos), stop_pos=int(stop_pos),
         fastq_name=fastq_name,
-        min_identity=float(min_identity), pad=int(pad),
         min_read_len=int(min_read_len) if min_read_len is not None else None,
         max_read_len=int(max_read_len) if max_read_len is not None else None,
         plasmid_seq=plasmid_seq.strip() or None,
+        structural_insertion_bp=int(structural_insertion_bp),
+        structural_deletion_bp=int(structural_deletion_bp),
         pie_positions=positions, pie_min_frac=float(pie_min_frac),
-        include_rare_variants=bool(include_rare_variants),
         auto_codon_match_pct=float(auto_pct) if auto_pct is not None else None)
     return params, run, None
