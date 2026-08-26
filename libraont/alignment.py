@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import edlib
 import numpy as np
 
-from .sequences import (collapse_whitespace, filter_fastq_by_length, revcomp,
+from .sequences import (collapse_whitespace, filter_fastq, revcomp,
                         write_fasta)
 
 TOOLS = ("minimap2", "samtools")
@@ -148,6 +148,7 @@ class Projection:
     structures: dict[str, ReadStructure]
     n_input: int
     n_length_kept: int
+    n_quality_kept: int
     n_mapped: int
     n_unaligned: int = 0        # no alignment at all: contaminant, not library
     n_off_target: int = 0       # crosses a junction but carries no insert: empty vector
@@ -207,7 +208,7 @@ def _sam_records(minimap2_bin: str, ref_fasta: str, fastq: str, threads: int,
 def project_reads(insert: str, fastq_path: str, minimap2_bin: str,
                   reference_seq: str | None = None, threads: int = 4,
                   min_read_len: int | None = None, max_read_len: int | None = None,
-                  n_input: int = 0) -> Projection:
+                  min_phred: int | None = None, n_input: int = 0) -> Projection:
     """Align reads and project each onto insert coordinates, keeping indels.
 
     Reads map to ``reference_seq`` (the whole plasmid) when given, else to the
@@ -226,11 +227,11 @@ def project_reads(insert: str, fastq_path: str, minimap2_bin: str,
         ref_fasta = write_fasta(ref_seq, os.path.join(workdir, "reference.fa"), name="ref1")
 
         reads_in = fastq_path
-        n_length_kept = n_input
-        if min_read_len is not None or max_read_len is not None:
-            reads_in = os.path.join(workdir, "length_filtered.fastq")
-            n_length_kept = filter_fastq_by_length(fastq_path, reads_in,
-                                                   min_read_len, max_read_len)
+        n_length_kept = n_quality_kept = n_input
+        if min_read_len is not None or max_read_len is not None or min_phred is not None:
+            reads_in = os.path.join(workdir, "filtered.fastq")
+            n_length_kept, n_quality_kept = filter_fastq(
+                fastq_path, reads_in, min_read_len, max_read_len, min_phred)
 
         lo, hi = region["start"], region["end"]
         flip = region["strand"] == "-"
@@ -308,6 +309,7 @@ def project_reads(insert: str, fastq_path: str, minimap2_bin: str,
         off_target = sum(1 for name in no_insert if crosses_junction(name))
         return Projection(insert=insert, rows=rows, structures=structures,
                           n_input=n_input or len(rows), n_length_kept=n_length_kept,
+                          n_quality_kept=n_quality_kept,
                           n_mapped=len(rows), n_off_target=off_target,
                           n_uninformative=len(no_insert) - off_target,
                           n_unaligned=unaligned, region=region)
@@ -450,22 +452,22 @@ def map_reads_to_reference(reference_seq: str, fastq_in: str, inner_seq: str | N
                            minimap2_bin: str, samtools_bin: str, threads: int = 4,
                            min_read_len: int | None = None,
                            max_read_len: int | None = None,
+                           min_phred: int | None = None,
                            max_map_reads: int = MAX_MAP_READS) -> ReadMap:
     """Align reads to ``reference_seq`` (minimap2 -> sorted/indexed BAM via
     samtools) and return where each one sits and how it agrees with the
     reference, plus an optional highlight for ``inner_seq`` (either strand).
 
-    When ``min_read_len``/``max_read_len`` are set, only reads whose length is in
-    that window are mapped, so the read map reflects the same
-    length-filtered dataset used by the rest of the analysis."""
+    ``min_read_len``/``max_read_len``/``min_phred`` apply the same read filters as
+    the rest of the analysis, so the map reflects the same dataset."""
     workdir = tempfile.mkdtemp(prefix="libraont_cov_")
     ref_fasta = write_fasta(reference_seq, os.path.join(workdir, "reference.fa"), name="ref1")
     bam = os.path.join(workdir, "all_reads.bam")
 
     reads_in = fastq_in
-    if min_read_len is not None or max_read_len is not None:
-        reads_in = os.path.join(workdir, "length_filtered.fastq")
-        filter_fastq_by_length(fastq_in, reads_in, min_read_len, max_read_len)
+    if min_read_len is not None or max_read_len is not None or min_phred is not None:
+        reads_in = os.path.join(workdir, "filtered.fastq")
+        filter_fastq(fastq_in, reads_in, min_read_len, max_read_len, min_phred)
 
     mm2 = subprocess.Popen([minimap2_bin, "-x", "map-ont", "-a", "-t", str(threads),
                             "--secondary=no", ref_fasta, reads_in], stdout=subprocess.PIPE)

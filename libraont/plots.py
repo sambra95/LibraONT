@@ -102,6 +102,83 @@ def read_length_figure(length_counts: Counter, min_read_len: int | None = None,
     return fig
 
 
+def read_quality_figure(phred_counts: Counter, min_phred: int | None = None) -> go.Figure:
+    """Reads surviving each quality cutoff: for every whole Q, how many reads
+    average at least that. The curve below the cutoff in force is drawn red, as
+    the excluded bars are on the read-length plot."""
+    if not phred_counts:
+        return _empty("No quality scores found")
+    # The cutoff joins the whole-Q points, so the two coloured stretches meet on it.
+    steps = sorted(set(phred_counts) | ({min_phred} if min_phred is not None else set()))
+    # Reverse-cumulative: reads at or above each step, read straight off as the
+    # yield of that cutoff.
+    survive = {b: sum(n for k, n in phred_counts.items() if k >= b) for b in steps}
+    total = sum(phred_counts.values())
+
+    def curve(points: list[int], colour: str, fill: str | None = None) -> go.Scatter:
+        return go.Scatter(
+            x=[survive[b] for b in points], y=points, mode="lines",
+            customdata=[f"{survive[b] / total:.1%}" for b in points],
+            # Splined, with modest smoothing: enough to read as a curve without
+            # bowing far off the whole-Q points it interpolates.
+            line=dict(color=colour, width=2.4, shape="spline", smoothing=0.8),
+            fill=fill, fillcolor=_rgba(colour, 0.13), showlegend=False,
+            hovertemplate="Mean Q%{y} or better<br>%{x} reads "
+                          "(%{customdata})<extra></extra>")
+
+    cut = min_phred if min_phred is not None else steps[0]
+    below = [b for b in steps if b <= cut]
+    # Both shaded areas bottom out on the lowest Q present, which is the axis.
+    kept, floor_q = survive[cut], steps[0]
+    fig = go.Figure()
+    if len(below) > 1:
+        # Discarded reads: between the cutoff's drop line and the curve below it.
+        fig.add_trace(go.Scatter(x=[kept] * len(below), y=below, mode="lines",
+                                 line_width=0, hoverinfo="skip", showlegend=False))
+        fig.add_trace(curve(below, _RED, fill="tonextx"))
+    # Kept reads: under the curve above the cutoff, squared off below it.
+    fig.add_trace(curve([b for b in steps if b >= cut], theme.PALETTE["primary"],
+                        fill="tozerox"))
+    fig.add_shape(type="rect", x0=0, x1=kept, y0=floor_q, y1=cut, layer="below",
+                  line_width=0, fillcolor=_rgba(theme.PALETTE["primary"], 0.13))
+    # Crosshair on hover: the spike down to the Reads axis answers "how many
+    # reads at this Q" without reading the tooltip.
+    fig.update_layout(hovermode="closest")
+    spike = dict(showspikes=True, spikemode="across", spikesnap="hovered data",
+                 spikecolor=theme.PALETTE["muted"], spikethickness=1, spikedash="dot")
+    fig.update_xaxes(**spike)
+    fig.update_yaxes(**spike)
+    if min_phred is not None:
+        # Cutoff stops at the curve, then drops to the axis: where that foot lands
+        # is how many reads the cutoff keeps.
+        for x0, y0, x1, y1 in ((0, min_phred, kept, min_phred),
+                               (kept, floor_q, kept, min_phred)):
+            fig.add_shape(type="line", x0=x0, y0=y0, x1=x1, y1=y1, layer="above",
+                          line=dict(color=_RED, width=1, dash="dash"))
+        fig.add_trace(go.Scatter(
+            x=[kept], y=[min_phred], mode="markers", showlegend=False,
+            marker=dict(size=7, color=_RED),
+            hovertemplate=f"Cutoff Q{min_phred}<br>{kept:,} reads kept "
+                          f"({kept / total:.1%})<extra></extra>"))
+        fig.add_annotation(x=kept / 2, y=min_phred, yshift=9, xanchor="center",
+                           text=f"Q{min_phred} - {kept:,} reads kept", showarrow=False,
+                           font=dict(size=11, color=_RED))
+    description = ("Reads whose mean Phred is at least each whole Q, over every read in "
+                   "the FASTQ - the yield left by any quality cutoff. Q10 is 90% "
+                   "base-call accuracy, Q20 99%, Q30 99.9%")
+    description += (". The dashed line is the cutoff in force - its foot on the axis "
+                    "is the reads kept, and the red stretch below it those excluded "
+                    "from every other plot."
+                    if min_phred is not None else ".")
+    fig.update_layout(
+        template=_T, title="Read quality distribution",
+        xaxis_title="Reads", yaxis_title="Mean Phred score per read (Q or better)",
+        xaxis_range=[0, total * 1.04], yaxis_range=[floor_q, steps[-1] + 0.5],
+        showlegend=False, meta={"description": description},
+    )
+    return fig
+
+
 def _insert_marker(fig: go.Figure, start: float, end: float) -> None:
     """Red bar labelled "insert" in the margin above the plot."""
     fig.add_shape(type="rect", xref="x", yref="paper",

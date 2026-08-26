@@ -40,6 +40,8 @@ class AnalysisParams:
     # dropped before alignment. ``None`` on either side disables that bound.
     min_read_len: Optional[int] = None
     max_read_len: Optional[int] = None
+    # Reads whose mean Phred falls below this are dropped with them.
+    min_phred: Optional[int] = None
     plasmid_seq: Optional[str] = None
     # Smallest indel counted as an assembly defect rather than basecall noise,
     # per direction.
@@ -112,6 +114,7 @@ class Report:
     funnel: list[FunnelStage]
     fates: list[ReadFate]
     mean_phred: Optional[float] = None
+    phred_counts: Counter = field(default_factory=Counter)
     hap_df: Optional[pd.DataFrame] = None
     read_map: Optional[ReadMap] = None
     # Most diversified codons any single read fails to cover - the ceiling worth
@@ -151,6 +154,7 @@ class AlignmentResult:
     target: str
     length_counts: Counter
     mean_phred: Optional[float]
+    phred_counts: Counter
     projection: Projection
 
 
@@ -178,18 +182,20 @@ def compute_alignment(params: AnalysisParams, tools: Optional[dict] = None,
 
     step(0.05, "Parsing reference and reading FASTQ…")
     target = extract_target(params.gene_seq, params.start_pos, params.stop_pos)
-    length_counts, mean_phred = fastq_stats(params.fastq_path)
+    length_counts, mean_phred, phred_counts = fastq_stats(params.fastq_path)
 
     step(0.25, "Aligning reads (minimap2)…")
     projection = alignment.project_reads(
         target, params.fastq_path, minimap2_bin=tools["minimap2"],
         reference_seq=params.plasmid_seq, min_read_len=params.min_read_len,
-        max_read_len=params.max_read_len, n_input=sum(length_counts.values()))
+        max_read_len=params.max_read_len, min_phred=params.min_phred,
+        n_input=sum(length_counts.values()))
     if not projection.rows:
         raise RuntimeError("No reads aligned to the reference insert. Check the gene "
                            "sequence and the read-length window.")
     return AlignmentResult(target=target, length_counts=length_counts,
-                           mean_phred=mean_phred, projection=projection)
+                           mean_phred=mean_phred, phred_counts=phred_counts,
+                           projection=projection)
 
 
 def compute_read_map(params: AnalysisParams, target: str, tools: Optional[dict] = None,
@@ -208,7 +214,8 @@ def compute_read_map(params: AnalysisParams, target: str, tools: Optional[dict] 
     return alignment.map_reads_to_reference(
         params.plasmid_seq, params.fastq_path, inner_seq=target,
         minimap2_bin=tools["minimap2"], samtools_bin=tools["samtools"],
-        min_read_len=params.min_read_len, max_read_len=params.max_read_len)
+        min_read_len=params.min_read_len, max_read_len=params.max_read_len,
+        min_phred=params.min_phred)
 
 
 def _build_funnel(params: AnalysisParams, result: AlignmentResult,
@@ -224,13 +231,19 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
         lo = f"{params.min_read_len:,}" if params.min_read_len is not None else "0"
         hi = f"{params.max_read_len:,}" if params.max_read_len is not None else "∞"
         window = f"{lo}-{hi} bp"
+    quality = f"Q{params.min_phred}+" if params.min_phred is not None else "no quality filter"
     stages = [
         FunnelStage("Reads in FASTQ", proj.n_input, "all reads submitted",
-                    ("Read length distribution",)),
+                    ("Read length distribution", "Read quality distribution")),
         FunnelStage("Within read-length window", proj.n_length_kept, window, (),
                     "outside the length window",
                     passed=f"are within the read-length window ({window})",
                     failed=f"fall outside the read-length window ({window})"),
+        FunnelStage("Above the quality cutoff", proj.n_quality_kept, quality, (),
+                    "below the quality cutoff",
+                    passed=f"have a mean Phred of {quality}" if params.min_phred is not None
+                           else "are not filtered on quality",
+                    failed=f"have a mean Phred below Q{params.min_phred}"),
         FunnelStage("Aligned to the reference", proj.n_aligned,
                     f"{proj.n_unaligned:,} discarded for not aligning at all "
                     "(contaminant DNA, not library)",
@@ -376,6 +389,7 @@ def tabulate_report(params: AnalysisParams, result: AlignmentResult,
     return Report(
         target=result.target, params=params, n_reads_kept=len(intact),
         length_counts=result.length_counts, mean_phred=result.mean_phred,
+        phred_counts=result.phred_counts,
         df_counts=df_counts, df_freq=df_freq, df_aa_counts=df_aa_counts,
         df_aa_freq=df_aa_freq, valid_positions=valid_positions,
         projection=proj, funnel=_build_funnel(params, result, intact, n_hap),

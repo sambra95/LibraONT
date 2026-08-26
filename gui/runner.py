@@ -32,7 +32,8 @@ def run_analysis(params: AnalysisParams, progress=None) -> Report:
 
     step(0.10, "Aligning reads")
     key = (params.fastq_path, params.gene_seq, params.start_pos, params.stop_pos,
-           params.plasmid_seq, params.min_read_len, params.max_read_len)
+           params.plasmid_seq, params.min_read_len, params.max_read_len,
+           params.min_phred)
     aln = _cached_alignment(key, params)
 
     # Uncached from here, so it always re-runs and may drive the progress bar.

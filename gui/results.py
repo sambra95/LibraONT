@@ -26,6 +26,7 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
         ("Read processing", plots.read_funnel_sankey_figure(
             report.funnel, report.fates,
             p.structural_insertion_bp, p.structural_deletion_bp)),
+        ("Read quality", plots.read_quality_figure(report.phred_counts, p.min_phred)),
         ("Read lengths", plots.read_length_figure(
             report.length_counts, p.min_read_len, p.max_read_len,
             plasmid_len=len(clean_sequence(p.plasmid_seq)) if p.plasmid_seq else None)),
@@ -168,6 +169,8 @@ def _parameter_rows(report: Report) -> list[tuple[str, str]]:
         ("Insert Region", f"{p.start_pos}-{p.stop_pos} (length {len(report.target):,} bp)"),
         ("Plasmid reference", "Yes" if p.plasmid_seq else "No"),
         ("Read length range", read_len_range),
+        ("Minimum read quality",
+         f"Q{p.min_phred}" if p.min_phred is not None else "No filtering"),
         ("Structural insertion threshold", f"≥ {p.structural_insertion_bp} bp"),
         ("Structural deletion threshold", f"≥ {p.structural_deletion_bp} bp"),
         ("Discarded, no alignment to reference", f"{report.n_discarded_unaligned:,}"),
