@@ -20,8 +20,6 @@ def _cached_ranges(path: str, key: tuple):
     return fastq_ranges(path)
 
 
-_TOOL_LABELS = {"minimap2": "minimap2", "samtools": "samtools"}
-
 _TOOL_DESCRIPTIONS = {
     "minimap2": "Required. Aligns every read - the basis for each plot and table.",
     "samtools": "Optional. Backs the read alignment map.",
@@ -69,11 +67,11 @@ def _tool_status() -> None:
         st.caption("Detected on PATH. A missing tool means the `libraont` "
                    "environment is not active.")
         versions = alignment.tool_versions()
-        for name, label in _TOOL_LABELS.items():
+        for name, description in _TOOL_DESCRIPTIONS.items():
             version = versions.get(name)
-            st.markdown(f"{'✅' if version else '⚠️'} **{label}** - "
+            st.markdown(f"{'✅' if version else '⚠️'} **{name}** - "
                         + (f"`{version}`" if version else "not found"))
-            st.caption(_TOOL_DESCRIPTIONS[name])
+            st.caption(description)
 
 
 def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
@@ -166,7 +164,7 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
             auto_pct = st.slider(
                 "Minimum identity (%)", 0.0, 100.0, 70.0, 1.0,
                 help="Codons matching the reference less often than this are "
-                     "treated as variable. Marked on the gap/match plot.")
+                     "treated as variable, and marked on the match trace.")
         else:
             positions_text = st.text_input(
                 "Codon positions", placeholder="e.g. 16, 129, 231",

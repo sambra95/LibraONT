@@ -48,12 +48,6 @@ def line(x1, y1, x2, y2, stroke=GRID, sw=1, dash=None):
             f'stroke-width="{sw}"{d}/>')
 
 
-def arrow(x1, y1, x2, y2, stroke=MUTED, sw=1.5, dash=None):
-    d = f' stroke-dasharray="{dash}"' if dash else ""
-    return (f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{stroke}" '
-            f'stroke-width="{sw}"{d} marker-end="url(#head)"/>')
-
-
 def group(*parts, transform=""):
     t = f' transform="{transform}"' if transform else ""
     return f"<g{t}>" + "".join(parts) + "</g>"

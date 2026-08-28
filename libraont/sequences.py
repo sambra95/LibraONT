@@ -51,12 +51,6 @@ def read_fastq_records(path: str) -> Iterator[tuple[str, str]]:
             yield seq, qual
 
 
-def read_fastq(path: str) -> Iterator[str]:
-    """Yield each read's sequence from a FASTQ file (supports .gz)."""
-    for seq, _qual in read_fastq_records(path):
-        yield seq
-
-
 def mean_phred(qual: str) -> float:
     """Mean Phred score over one read's quality string."""
     return sum(ord(c) - 33 for c in qual) / len(qual)
@@ -71,8 +65,9 @@ def fastq_stats(path: str) -> tuple[Counter, float | None, Counter]:
     for seq, qual in read_fastq_records(path):
         counts[len(seq)] += 1
         if qual:
-            phred_counts[int(mean_phred(qual))] += 1
-            total_q += sum(ord(c) - 33 for c in qual)
+            q_sum = sum(ord(c) for c in qual) - 33 * len(qual)
+            phred_counts[q_sum // len(qual)] += 1
+            total_q += q_sum
             total_b += len(qual)
     return counts, (total_q / total_b if total_b else None), phred_counts
 
@@ -113,9 +108,7 @@ def filter_fastq(in_path: str, out_path: str, min_len: int | None,
 def fastq_ranges(path: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
     """One pass: ``((shortest, longest) read length, (lowest, highest) per-read
     mean Phred floored to a whole Q)``, or ``None`` if the FASTQ is empty.
-
-    Flooring keeps both slider bounds inclusive: no read is below the low bound,
-    and the best reads still clear the high one."""
+    Flooring keeps both slider bounds inclusive."""
     lo = hi = q_lo = q_hi = None
     for seq, qual in read_fastq_records(path):
         n = len(seq)

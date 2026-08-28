@@ -12,8 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from steps import THRESHOLDS
-from svgkit import (DARK, DROP, GRID, MONO, MUTED, SURFACE, line, panel, rect,
-                    text, write)
+from svgkit import (DARK, DROP, GRID, MONO, MUTED, line, panel, rect, text,
+                    write)
 from libraont.plots import FATE_COLORS
 
 W, H = 560, 880

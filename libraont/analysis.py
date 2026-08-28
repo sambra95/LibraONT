@@ -19,11 +19,9 @@ _AA_IDX = {a: i for i, a in enumerate(AA_ORDER)}
 def counts_from_msa_ref_columns(msa: dict[str, str], ref_name: str = "REF",
                                 alphabet: tuple[str, ...] = BASE_CATEGORIES,
                                 ignore_terminal_gaps: bool = True):
-    """Per-position base counts/frequencies on reference columns (REF != '-').
-
-    With ``ignore_terminal_gaps``, '-' outside a read's covered span is skipped.
-    Returns ``(df_counts, df_freq, ref_cols, coverage)``.
-    """
+    """Per-position base counts/frequencies on reference columns (REF != '-'),
+    as ``(df_counts, df_freq, ref_cols, coverage)``. With
+    ``ignore_terminal_gaps``, '-' outside a read's covered span is skipped."""
     alphabet = list(alphabet)
     alpha_idx = {b: i for i, b in enumerate(alphabet)}
 
@@ -76,10 +74,8 @@ def counts_from_msa_ref_columns(msa: dict[str, str], ref_name: str = "REF",
 
 def reference_match_percent(df_counts: pd.DataFrame, ref_seq: str,
                             gap_char: str = "-") -> np.ndarray:
-    """Percentage of non-gap reads carrying the reference base, per column.
-
-    Aligned to ``df_counts`` rows; gaps are out of the denominator.
-    """
+    """Percentage of non-gap reads carrying the reference base, per column,
+    aligned to ``df_counts`` rows; gaps are out of the denominator."""
     L = len(df_counts)
     ref_seq = (ref_seq or "").upper()[:L]
     totals = df_counts.sum(axis=1).astype(float).to_numpy()
@@ -112,12 +108,9 @@ def _aa_from_triplet(b0: str, b1: str, b2: str) -> str | None:
 
 
 def aa_counts_from_msa(msa: dict[str, str], ref_name: str = "REF", frame_offset: int = 0):
-    """Amino-acid counts per codon position from reference columns (REF != '-').
-
-    ``frame_offset`` (0/1/2) is where the ORF starts relative to the first REF base.
-
-    Returns ``(df_aa_counts, df_aa_freq, ref_codons)``.
-    """
+    """Amino-acid counts per codon from reference columns (REF != '-'), as
+    ``(df_aa_counts, df_aa_freq, ref_codons)``. ``frame_offset`` (0/1/2) is
+    where the ORF starts relative to the first REF base."""
     if frame_offset not in (0, 1, 2):
         raise ValueError("frame_offset must be 0, 1, or 2")
 
@@ -157,93 +150,46 @@ def get_ref_codons(msa: dict[str, str], ref_name: str = "REF") -> list[tuple[int
     return ref_codons
 
 
+def codon_calls(row: str, ref_codons: list[tuple[int, int, int]],
+                positions) -> tuple[str | None, ...]:
+    """The amino acid at each 1-based codon in ``positions`` for one aligned
+    row; ``None`` where the codon cannot be read."""
+    up = row.upper()
+    return tuple(_aa_from_triplet(up[c0], up[c1], up[c2])
+                 for c0, c1, c2 in (ref_codons[p - 1] for p in positions
+                                    if 1 <= p <= len(ref_codons)))
+
+
 def read_codon_calls(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
                      positions, ref_name: str = "REF"
                      ) -> dict[str, tuple[str | None, ...]]:
-    """Per read, the amino acid at each of ``positions``; ``None`` where the
-    codon cannot be read. Kept position-by-position rather than collapsed, so a
-    single readable non-reference codon can still settle a read as a variant."""
-    pos0 = [p - 1 for p in positions if 1 <= p <= len(ref_codons)]
-    out: dict[str, tuple[str | None, ...]] = {}
-    for name, row in msa.items():
-        if name == ref_name:
-            continue
-        calls = []
-        for p0 in pos0:
-            c0, c1, c2 = ref_codons[p0]
-            calls.append(_aa_from_triplet(row[c0].upper(), row[c1].upper(),
-                                          row[c2].upper()))
-        out[name] = tuple(calls)
-    return out
+    """:func:`codon_calls` per read. Kept position-by-position rather than
+    collapsed, so one readable non-reference codon settles a read as a variant."""
+    return {name: codon_calls(row, ref_codons, positions)
+            for name, row in msa.items() if name != ref_name}
 
 
-def read_haplotypes(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
-                    positions, ref_name: str = "REF", *, unknown: str = "?",
-                    max_unknown: int = 0) -> dict[str, tuple | None]:
-    """Per read, the AA tuple across ``positions``, or ``None`` when more than
-    ``max_unknown`` of them cannot be read. Codons that cannot be read carry
-    ``unknown``; at the default of 0 that never happens and only reads called at
-    every position keep a haplotype."""
-    out: dict[str, tuple | None] = {}
-    for name, calls in read_codon_calls(msa, ref_codons, positions,
-                                        ref_name).items():
-        out[name] = (tuple(c if c is not None else unknown for c in calls)
-                     if sum(c is None for c in calls) <= max_unknown else None)
-    return out
-
-
-def haplotype_counts(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
-                     positions, ref_name: str = "REF", *, unknown: str = "?",
-                     max_unknown: int = 0) -> pd.DataFrame:
-    """Unique AA combinations across the given 1-based codon positions, from
-    reads missing at most ``max_unknown`` of them. A codon that cannot be read
-    carries ``unknown`` and counts as a residue in its own right. Columns:
-    ``combo_label, combo_tuple, count, is_reference, aa_hamming_distance``,
-    descending by count."""
+def haplotype_counts(calls: dict[str, tuple[str | None, ...]],
+                     ref_calls: tuple[str | None, ...] | None, positions, *,
+                     unknown: str = "?", max_unknown: int = 0) -> pd.DataFrame:
+    """Unique AA combinations over ``positions``, from the reads in ``calls``
+    (see :func:`read_codon_calls`) missing at most ``max_unknown`` of them; an
+    unreadable codon carries ``unknown`` and counts as a residue in its own
+    right. Columns: ``combo_label, combo_tuple, count, is_reference,
+    aa_hamming_distance``, descending by count."""
     cols = ["combo_label", "combo_tuple", "count", "is_reference", "aa_hamming_distance"]
-    pos_ok = [p for p in positions if 1 <= p <= len(ref_codons)]
-    if not pos_ok:
-        return pd.DataFrame(columns=cols)
-
-    pos0 = [p - 1 for p in pos_ok]
-    ref_row = msa[ref_name]
-    ref_hap, ref_ok = [], True
-    for p0 in pos0:
-        c0, c1, c2 = ref_codons[p0]
-        aa = _aa_from_triplet(ref_row[c0].upper(), ref_row[c1].upper(), ref_row[c2].upper())
-        if aa is None:
-            ref_ok = False
-            break
-        ref_hap.append(aa)
-    ref_tuple = tuple(ref_hap) if ref_ok else None
-
     ctr: Counter = Counter(
-        hap for hap in read_haplotypes(msa, ref_codons, pos_ok, ref_name,
-                                       unknown=unknown,
-                                       max_unknown=max_unknown).values()
-        if hap is not None)
-
+        tuple(c if c is not None else unknown for c in call)
+        for call in calls.values() if sum(c is None for c in call) <= max_unknown)
     if not ctr:
         return pd.DataFrame(columns=cols)
-    rows = []
-    for tup, cnt in sorted(ctr.items(), key=lambda kv: kv[1], reverse=True):
-        hamming = sum(a != b for a, b in zip(tup, ref_tuple)) if ref_tuple is not None else None
-        rows.append({
-            "combo_label": " | ".join(f"{p}:{aa}" for p, aa in zip(pos_ok, tup)),
-            "combo_tuple": tup,
-            "count": cnt,
-            "is_reference": tup == ref_tuple,
-            "aa_hamming_distance": hamming,
-        })
-    return pd.DataFrame(rows)
-
-
-def haplotype_gini(hap_df: pd.DataFrame) -> float:
-    """Gini of the haplotype counts: ~0 even, ~1 dominated by a few combos."""
-    if hap_df.empty:
-        return float("nan")
-    counts = np.sort(hap_df["count"].values)
-    lorenz_y = np.concatenate([[0], counts.cumsum() / counts.sum()])
-    lorenz_x = np.linspace(0, 1, len(lorenz_y))
-    trapezoid = getattr(np, "trapezoid", None) or np.trapz   # renamed in NumPy 2
-    return float(1 - 2 * trapezoid(lorenz_y, lorenz_x))
+    ref_tuple = (tuple(ref_calls) if ref_calls and all(a is not None for a in ref_calls)
+                 else None)
+    return pd.DataFrame([
+        {"combo_label": " | ".join(f"{p}:{aa}" for p, aa in zip(positions, tup)),
+         "combo_tuple": tup,
+         "count": cnt,
+         "is_reference": tup == ref_tuple,
+         "aa_hamming_distance": (sum(a != b for a, b in zip(tup, ref_tuple))
+                                 if ref_tuple is not None else None)}
+        for tup, cnt in sorted(ctr.items(), key=lambda kv: kv[1], reverse=True)])

@@ -144,7 +144,7 @@ def _icon(kind: str, cx: float, top: float) -> str:
                 + arc(cx, cy, r, -90, 20, CODON, 4.5, cap="butt")
                 + arc(cx, cy, r, 20, 95, INSERT, 4.5, cap="butt"))
     if kind == "treemap":                       # variants, boxed by abundance
-        x0, y0, w, h = cx - 16, top + 1, 32, ICON_H - 2
+        x0, y0, h = cx - 16, top + 1, ICON_H - 2
         return "".join([
             rect(x0, y0, 17, h, fill=PRIMARY, stroke="none", opacity=0.55),
             rect(x0 + 18, y0, 14, 9, fill=PRIMARY, stroke="none", opacity=0.34),

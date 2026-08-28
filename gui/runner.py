@@ -1,12 +1,9 @@
 """Streamlit-cached composition of the analysis pipeline.
 
-Only the minimap2 alignment is memoised, keyed on just the parameters affecting
-it, so tweaking a downstream input reuses it. Everything after recomputes, so
-the dashboard never shows stale results. Caching lives here, not in
-``libraont``, keeping the package free of Streamlit.
-
-The cached function must stay pure: ``st.cache_data`` replays element
-side-effects, so progress is driven *around* the call, not inside it.
+Only the minimap2 alignment is memoised, keyed on the parameters affecting it,
+so tweaking a downstream input reuses it and nothing downstream goes stale. The
+cached call must stay pure - ``st.cache_data`` replays element side-effects - so
+progress is driven around it.
 """
 
 from __future__ import annotations
@@ -25,7 +22,7 @@ def _cached_alignment(key: tuple, _params: AnalysisParams) -> AlignmentResult:
 
 
 def run_analysis(params: AnalysisParams, progress=None) -> Report:
-    """Run the pipeline"""
+    """Run the pipeline."""
     def step(frac: float, msg: str) -> None:
         if progress:
             progress(frac, msg)

@@ -61,20 +61,15 @@ def tool_versions() -> dict[str, str | None]:
     return {name: _tool_version(name, path) for name, path in tool_status().items()}
 
 
-# CIGAR ops by what they consume: reference span, and alignment columns (the
-# denominator for BLAST-style identity).
 _CIGAR_RE = re.compile(r"(\d+)([MIDNSHP=X])")
-_REF_CONSUMING = frozenset("MDN=X")
-_ALN_COLUMNS = frozenset("MIDN=X")
+_REF_CONSUMING = frozenset("MDN=X")     # CIGAR ops consuming reference span
 
 
 # --- Locating the insert inside a larger reference ---------------------------
 def locate_insert(reference: str, insert: str) -> dict | None:
     """1-based inclusive span of ``insert`` within ``reference`` (either strand).
-
-    Approximate, not a substring search: a supplied gene routinely differs from
-    the plasmid's copy of it by a few bases.
-    """
+    Approximate, not a substring search: the supplied gene routinely differs
+    from the plasmid's copy by a few bases."""
     ref = collapse_whitespace(reference).upper()
     query = collapse_whitespace(insert).upper()
     if not ref or not query:
@@ -101,7 +96,6 @@ class ReadStructure:
     reverse: bool
     ref_start: int              # 1-based inclusive, insert coordinates
     ref_end: int
-    identity: float
     insertions: list[tuple[int, int]] = field(default_factory=list)  # (pos, length)
     deletions: list[tuple[int, int]] = field(default_factory=list)
 
@@ -210,11 +204,9 @@ def project_reads(insert: str, fastq_path: str, minimap2_bin: str,
                   min_read_len: int | None = None, max_read_len: int | None = None,
                   min_phred: int | None = None, n_input: int = 0) -> Projection:
     """Align reads and project each onto insert coordinates, keeping indels.
-
     Reads map to ``reference_seq`` (the whole plasmid) when given, else to the
-    insert. The larger reference matters: aligned to the insert alone, a read
-    extending past it is split, hiding the insertions this exists to measure.
-    """
+    insert; against the insert alone a read extending past it is split, hiding
+    the insertions this exists to measure."""
     insert = collapse_whitespace(insert).upper()
     workdir = tempfile.mkdtemp(prefix="libraont_aln_")
     try:
@@ -239,10 +231,9 @@ def project_reads(insert: str, fastq_path: str, minimap2_bin: str,
         rows: dict[str, str] = {}
         structures: dict[str, ReadStructure] = {}
         unaligned = 0
-        # A read carrying no insert bases only means "insert missing" if it
-        # actually crosses a vector-insert junction; one aligned elsewhere on the
-        # plasmid says nothing either way. Junction-crossing is judged over all
-        # of a read's segments, since minimap2 splits a deletion this large.
+        # A read with no insert bases only means "insert missing" if it crosses
+        # a vector-insert junction, judged over all its segments since minimap2
+        # splits a deletion this large.
         segments: dict[str, list[tuple[int, int]]] = {}
         no_insert: list[str] = []
 
@@ -288,9 +279,6 @@ def project_reads(insert: str, fastq_path: str, minimap2_bin: str,
             if end < start:            # no insert bases; resolved after the loop
                 no_insert.append(name)
                 continue
-            columns = sum(n for n, op in ops if op in _ALN_COLUMNS)
-            nm = next((int(t[5:]) for t in f[11:] if t.startswith("NM:i:")), None)
-            identity = 1.0 - nm / columns if (nm is not None and columns > 0) else float("nan")
             start, end = start + 1, end + 1
             if flip:                     # insert lies on the reverse strand
                 projected = revcomp(projected)
@@ -300,7 +288,7 @@ def project_reads(insert: str, fastq_path: str, minimap2_bin: str,
             rows[name] = projected
             structures[name] = ReadStructure(
                 name=name, reverse=bool(flag & 0x10) != flip, ref_start=start,
-                ref_end=end, identity=identity, insertions=ins, deletions=dels)
+                ref_end=end, insertions=ins, deletions=dels)
 
         def crosses_junction(name: str) -> bool:
             return any(s < lo <= e or s <= hi < e
@@ -324,30 +312,31 @@ class ReadMap:
     mapped_reads: int
     contig: str
     region: dict | None = None  # {'start','end','strand'} or None
-    # Per-read alignment span on the contig (1-based inclusive) and identity, for
-    # the read-alignment map. Parallel arrays over primary alignments.
+    # Alignment span on the contig (1-based inclusive), per primary alignment.
     read_starts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     read_ends: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
-    read_identities: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=float))
-    # Per-read, per-contig-base agreement with the reference, row-aligned to the
-    # arrays above: 0 = not covered, 1 = matches, 2 = substituted, 3 = deleted.
-    # uint8 keeps a deep pileup over a whole plasmid cheap to hold and to draw.
-    # Insertions are absent here by design - they occupy no reference base, so
-    # they live only in the sparse records below.
+    # Per-read, per-base agreement, row-aligned to those: 0 = not covered,
+    # 1 = matches, 2 = substituted, 3 = deleted. Insertions occupy no reference
+    # base, so they live only in the sparse records below.
     match_matrix: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.uint8))
-    # Indels as sparse triples - which kept row, where on the contig, how many
-    # bases - so their size survives, which a per-base matrix cannot carry, and
-    # so the plot can apply a size threshold without losing the underlying data.
+    # Indels as sparse (row, contig position, length) triples, so their size
+    # survives for the plot to threshold on.
     insertion_rows: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     insertion_positions: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     insertion_lengths: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     deletion_rows: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     deletion_positions: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     deletion_lengths: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
-    # Per-base tallies over *every* mapped read, not just the rows kept for the
-    # map, so the agreement trace stays exact however deep the pileup gets.
+    # Per-base tallies over *every* mapped read, not just the rows kept, so the
+    # traces stay exact however deep the pileup gets.
     match_counts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
     depth_counts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    # Reads whose alignment actually holds a base here - matches and
+    # substitutions, but not deletions, which ``depth_counts`` still counts.
+    covered_counts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
+    # Phred scores summed over those same bases, so ``quality_sums /
+    # covered_counts`` is the mean basecall quality at each position.
+    quality_sums: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=np.int64))
     contig_length: int = 0
 
 
@@ -360,17 +349,12 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
                     contig_length: int, max_rows: int = 0
                     ) -> tuple[np.ndarray, ...]:
-    """Per-read (start, end, identity, per-base agreement) on ``contig``.
-
-    Positions are 1-based inclusive; identity is ``1 - NM/aligned_columns``
-    (``nan`` without an ``NM`` tag). The agreement matrix codes each base 0 (not
-    covered), 1 (match), 2 (substituted) or 3 (deleted); indels also come back
-    as sparse (row, position, length) triples, since a per-base matrix carries
-    no length and an insertion has no base of its own.
+    """Per-read spans and per-base agreement on ``contig``, 1-based inclusive.
 
     ``max_rows`` caps the rows kept for the map, sampled evenly; the per-base
-    tallies still cover every read, so the agreement trace is never a sample.
-    """
+    tallies still cover every read. They split what a read spans (``depth``)
+    from what it holds a base for (``covered``, which the Phred scores are
+    summed over): a deletion counts in the first but not the second."""
     view = _run([samtools, "view", "-F", "0x904", bam, contig])
     lines = [ln for ln in view.stdout.splitlines() if ln]
     step = math.ceil(len(lines) / max_rows) if max_rows and len(lines) > max_rows else 1
@@ -378,7 +362,9 @@ def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
     ref = np.frombuffer(contig_seq.upper().encode(), dtype="S1")
     match_counts = np.zeros(contig_length, dtype=np.int64)
     depth_counts = np.zeros(contig_length, dtype=np.int64)
-    starts, ends, idents, rows = [], [], [], []
+    covered_counts = np.zeros(contig_length, dtype=np.int64)
+    quality_sums = np.zeros(contig_length, dtype=np.int64)
+    starts, ends, rows = [], [], []
     ins_records: tuple[list, list, list] = ([], [], [])
     del_records: tuple[list, list, list] = ([], [], [])
     for index, line in enumerate(lines):
@@ -390,11 +376,12 @@ def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
             continue
         ops = [(int(n), op) for n, op in _CIGAR_RE.findall(cigar)]
         ref_span = sum(n for n, op in ops if op in _REF_CONSUMING)
-        columns = sum(n for n, op in ops if op in _ALN_COLUMNS)
         if ref_span <= 0:
             continue
         pos = int(f[3])
-        seq = f[9]
+        seq, qual = f[9], f[10]
+        scores = (np.frombuffer(qual.encode(), dtype=np.uint8).astype(np.int64) - 33
+                  if qual != "*" else None)
         row = np.zeros(contig_length, dtype=np.uint8)
         insertions: list[tuple[int, int]] = []
         deletions: list[tuple[int, int]] = []
@@ -407,6 +394,8 @@ def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
                     read_seg = np.frombuffer(seq[q:q + (hi - lo)].upper().encode(),
                                              dtype="S1")
                     row[lo:hi] = np.where(read_seg == ref[lo:hi], 1, 2)
+                    if scores is not None:
+                        quality_sums[lo:hi] += scores[q:q + (hi - lo)]
                 r += n
                 q += n
             elif op in "DN":
@@ -422,6 +411,7 @@ def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
                 q += n
         match_counts += (row == 1)
         depth_counts += (row > 0)
+        covered_counts += (row == 1) | (row == 2)   # a deletion covers nothing
         if index % step:
             continue
         for store, events in ((ins_records, insertions), (del_records, deletions)):
@@ -431,13 +421,11 @@ def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
                 store[2].append(length)
         starts.append(pos)
         ends.append(pos + ref_span - 1)
-        nm = next((int(t[5:]) for t in f[11:] if t.startswith("NM:i:")), None)
-        idents.append(1.0 - nm / columns if (nm is not None and columns > 0) else np.nan)
         rows.append(row)
     matrix = (np.vstack(rows) if rows
               else np.empty((0, contig_length), dtype=np.uint8))
     return (np.asarray(starts, dtype=int), np.asarray(ends, dtype=int),
-            np.asarray(idents, dtype=float), matrix, match_counts, depth_counts,
+            matrix, match_counts, depth_counts, covered_counts, quality_sums,
             *(np.asarray(a, dtype=int) for a in ins_records),
             *(np.asarray(a, dtype=int) for a in del_records))
 
@@ -454,12 +442,9 @@ def map_reads_to_reference(reference_seq: str, fastq_in: str, inner_seq: str | N
                            max_read_len: int | None = None,
                            min_phred: int | None = None,
                            max_map_reads: int = MAX_MAP_READS) -> ReadMap:
-    """Align reads to ``reference_seq`` (minimap2 -> sorted/indexed BAM via
-    samtools) and return where each one sits and how it agrees with the
-    reference, plus an optional highlight for ``inner_seq`` (either strand).
-
-    ``min_read_len``/``max_read_len``/``min_phred`` apply the same read filters as
-    the rest of the analysis, so the map reflects the same dataset."""
+    """Align reads to ``reference_seq`` (minimap2 -> sorted BAM) and return where
+    each sits and how it agrees, plus an optional ``inner_seq`` highlight. The
+    read filters match the rest of the analysis, so the map is the same dataset."""
     workdir = tempfile.mkdtemp(prefix="libraont_cov_")
     ref_fasta = write_fasta(reference_seq, os.path.join(workdir, "reference.fa"), name="ref1")
     bam = os.path.join(workdir, "all_reads.bam")
@@ -504,15 +489,17 @@ def map_reads_to_reference(reference_seq: str, fastq_in: str, inner_seq: str | N
 
     if not contig_seq:
         contig_seq = _fetch_contig_seq(samtools_bin, ref_fasta, contig).upper()
-    (read_starts, read_ends, read_idents, match_matrix, match_counts, depth_counts,
-     ins_rows, ins_pos, ins_len, del_rows, del_pos, del_len) = _read_intervals(
+    (read_starts, read_ends, match_matrix, match_counts, depth_counts,
+     covered_counts, quality_sums, ins_rows, ins_pos, ins_len, del_rows, del_pos,
+     del_len) = _read_intervals(
         samtools_bin, bam, contig, contig_seq, contig_length, max_rows=max_map_reads)
 
     shutil.rmtree(workdir, ignore_errors=True)
     return ReadMap(mapped_reads, contig, region,
                           read_starts=read_starts, read_ends=read_ends,
-                          read_identities=read_idents, match_matrix=match_matrix,
+                          match_matrix=match_matrix,
                           match_counts=match_counts, depth_counts=depth_counts,
+                          covered_counts=covered_counts, quality_sums=quality_sums,
                           insertion_rows=ins_rows, insertion_positions=ins_pos,
                           insertion_lengths=ins_len, deletion_rows=del_rows,
                           deletion_positions=del_pos, deletion_lengths=del_len,

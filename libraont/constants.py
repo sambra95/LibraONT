@@ -20,16 +20,10 @@ AA_ORDER: list[str] = list("ARNDCQEGHILKMFPSTWYV") + ["*"]
 # Per-position base categories used to tabulate the MSA.
 BASE_CATEGORIES: tuple[str, ...] = ('A', 'C', 'G', 'T', 'N', 'other', '-')
 
-# Default analysis parameters.
-# Amino acids below this frequency at their codon are folded into 'Other' in the
-# AA pies, and variants carrying one are dropped from the treemap. Set low: in a
-# diverse library the individual variant residues *are* rare, so a high value
-# removes real library members along with basecall noise.
+# Amino acids rarer than this fold into 'Other'. Set low: in a diverse library
+# the individual variant residues *are* rare.
 DEFAULT_PIE_MIN_FRAC: float = 0.02
-# Smallest indel treated as a structural (assembly) defect rather than basecall
-# noise, set separately per direction because a library can fail one way without
-# failing the other. ONT indel errors are 1-9 bp; real rearrangements are much
-# larger, and the gap between them is empty, so any value in ~10-25 bp behaves
-# identically.
+# Smallest indel treated as an assembly defect, per direction. ONT indel errors
+# are 1-9 bp and real rearrangements much larger, so ~10-25 bp behaves alike.
 DEFAULT_STRUCTURAL_INSERTION_BP: int = 10
 DEFAULT_STRUCTURAL_DELETION_BP: int = 10

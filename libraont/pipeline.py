@@ -1,11 +1,9 @@
-"""High-level orchestration: FASTQ + reference -> a fully-populated :class:`Report`.
+"""FASTQ + reference -> a fully-populated :class:`Report`.
 
 Computation only; presentation lives in ``libraont.plots`` and the GUI. Heavy
-steps report through an optional ``progress(fraction, message)`` callback.
-
-Reads holding an indel at or above its structural threshold are mis-assembled
-and excluded from the composition tables, so the base/AA counts, pies and
-treemap describe the correctly assembled fraction only.
+steps report through an optional ``progress(fraction, message)`` callback. Reads
+holding an indel at or above its structural threshold are mis-assembled and left
+out of the composition tables, so those describe the assembled fraction only.
 """
 
 from __future__ import annotations
@@ -169,10 +167,7 @@ def _stepper(progress: Progress):
 def compute_alignment(params: AnalysisParams, tools: Optional[dict] = None,
                       progress: Progress = None) -> AlignmentResult:
     """Expensive stage: target extraction and minimap2 alignment/projection.
-
-    Pure and side-effect free given its inputs, so it is safe to memoise on the
-    parameters that affect it (see ``gui.runner``).
-    """
+    Pure given its inputs, so it is safe to memoise (see ``gui.runner``)."""
     step = _stepper(progress)
     tools = tools if tools is not None else alignment.tool_status()
     if not tools.get("minimap2"):
@@ -200,11 +195,8 @@ def compute_alignment(params: AnalysisParams, tools: Optional[dict] = None,
 
 def compute_read_map(params: AnalysisParams, target: str, tools: Optional[dict] = None,
                      progress: Progress = None) -> Optional[ReadMap]:
-    """Optional whole-plasmid read map (needs a plasmid + minimap2 + samtools).
-
-    Returns ``None`` when no plasmid was given or the tools are unavailable -
-    the GUI surfaces the latter as a warning. Also expensive, so cached too.
-    """
+    """Optional whole-plasmid read map, ``None`` without a plasmid or without
+    minimap2 + samtools - the GUI surfaces the latter as a warning."""
     if not params.plasmid_seq:
         return None
     tools = tools if tools is not None else alignment.tool_status()
@@ -234,7 +226,7 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
     quality = f"Q{params.min_phred}+" if params.min_phred is not None else "no quality filter"
     stages = [
         FunnelStage("Reads in FASTQ", proj.n_input, "all reads submitted",
-                    ("Read length distribution", "Read quality distribution")),
+                    ("Summary of Dataset and Processing",)),
         FunnelStage("Within read-length window", proj.n_length_kept, window, (),
                     "outside the length window",
                     passed=f"are within the read-length window ({window})",
@@ -247,7 +239,7 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
         FunnelStage("Aligned to the reference", proj.n_aligned,
                     f"{proj.n_unaligned:,} discarded for not aligning at all "
                     "(contaminant DNA, not library)",
-                    ("Read alignment map",), "no alignment",
+                    ("Summary of Read Alignments",), "no alignment",
                     passed="align somewhere on the reference",
                     failed="do not align to the reference at all"),
         FunnelStage("Informative about the insert", proj.n_informative,
@@ -269,9 +261,9 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
             f"no insertion ≥ {params.structural_insertion_bp} bp or deletion ≥ "
             f"{params.structural_deletion_bp} bp. Of the {n_span:,} reads "
             f"spanning the whole insert, {len(spanning_intact):,} "
-            f"({spanning_rate}) are correctly assembled - the rate quoted on the "
-            "summary card, since only a spanning read can be judged",
-            ("Alignment to reference insert", "AA distribution"),
+            f"({spanning_rate}) are correctly assembled - only a spanning read "
+            "can be judged",
+            ("Summary of Library Diversity and Coverage",),
             "structural indel",
             passed=f"carry no insertion ≥ {params.structural_insertion_bp} bp and "
                    f"no deletion ≥ {params.structural_deletion_bp} bp",
@@ -283,7 +275,8 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
         stages.append(FunnelStage(
             "Called at every variable codon", n_haplotype_reads,
             "intact reads with an unambiguous codon at all selected positions",
-            ("Variant treemap",), "a diversified codon unreadable",
+            ("Summary of Library Diversity and Coverage",),
+            "a diversified codon unreadable",
             passed="give an unambiguous amino acid at every diversified codon",
             failed="have at least one diversified codon that cannot be called"))
     return stages
@@ -299,13 +292,10 @@ def _build_fates(params: AnalysisParams, result: AlignmentResult,
 
     def usable_fate(name: str) -> str:
         """Sort a structurally sound read by what it proves about diversity.
-
-        Asymmetric: one readable non-reference codon proves a variant whatever
-        its neighbours do, while wild type claims *no* designed position changed
-        and so needs every diversified codon read. Anything else is ambiguous.
-        With no diversified codons selected there is nothing that could differ,
-        so a read spanning the insert is wild type by definition.
-        """
+        Asymmetric: one readable non-reference codon proves a variant, while
+        wild type claims *no* designed position changed and so needs every
+        diversified codon read. With none selected, a spanning read is wild
+        type by definition."""
         if calls is None or ref_calls is None:
             return "Wild type" if name in spanning else "Ambiguous diversity"
         read_calls = calls.get(name)
@@ -362,22 +352,16 @@ def tabulate_report(params: AnalysisParams, result: AlignmentResult,
         pie_positions += analysis.detect_variable_codons(
             df_counts, ref_seq, params.auto_codon_match_pct)
     valid_positions = sorted({p for p in pie_positions if 1 <= p <= df_aa_counts.shape[0]})
-    hap_df = None
+    hap_df = calls = ref_calls = None
     if valid_positions:
         step(0.88, "Counting haplotypes…")
-        hap_df = analysis.haplotype_counts(
-            msa, analysis.get_ref_codons(msa, ref_name=REF_NAME), valid_positions,
-            ref_name=REF_NAME,
-            unknown=UNCALLED, max_unknown=params.max_unknown_codons)
-
-    calls = ref_calls = None
-    if valid_positions:
         ref_codons = analysis.get_ref_codons(msa, ref_name=REF_NAME)
         calls = analysis.read_codon_calls(msa, ref_codons, valid_positions,
                                           ref_name=REF_NAME)
-        ref_only = {REF_NAME: result.target, "_ref": result.target}
-        ref_calls = analysis.read_codon_calls(ref_only, ref_codons, valid_positions,
-                                              ref_name=REF_NAME)["_ref"]
+        ref_calls = analysis.codon_calls(result.target, ref_codons, valid_positions)
+        hap_df = analysis.haplotype_counts(calls, ref_calls, valid_positions,
+                                           unknown=UNCALLED,
+                                           max_unknown=params.max_unknown_codons)
 
     # Independent of the treemap tolerance: this stage always means every codon
     # read. ``worst`` is the other end - the most any one read is missing.
