@@ -62,20 +62,29 @@ def _figure_description(fig: go.Figure) -> str:
     return str(meta.get("description") or "")
 
 
-def _warnings(report: Report) -> list[str]:
-    """Caveats shown above the results, in the app and in the report."""
-    notes = []
+def _insert_note(report: Report) -> str | None:
+    """Caveat for an insert that is not a whole number of codons; the trailing
+    bases never form one, so they are dropped."""
     codons, spare = divmod(len(report.target), 3)
-    if spare:      # trailing bases never form a codon, so they are dropped
-        notes.append(
-            f"Insert is {len(report.target):,} bp - not a whole number of codons "
+    if not spare:
+        return None
+    return (f"Insert is {len(report.target):,} bp - not a whole number of codons "
             f"({codons:,} codons + {spare} spare base{'' if spare == 1 else 's'}). "
             f"The spare base{' is' if spare == 1 else 's are'} dropped from the "
             "codon and amino-acid analysis; check the start and stop positions.")
+
+
+def _samtools_note(report: Report) -> str | None:
+    """Caveat for a plasmid given without the tool that maps reads to it."""
     if report.params.plasmid_seq and report.read_map is None:
-        notes.append("Read alignment map skipped - samtools was not found on PATH "
-                     "(activate the `libraont` conda environment).")
-    return notes
+        return ("Read alignment map skipped - samtools was not found on PATH "
+                "(activate the `libraont` conda environment).")
+    return None
+
+
+def _warnings(report: Report) -> list[str]:
+    """Caveats shown above the results, in the app and in the report."""
+    return [note for note in (_insert_note(report), _samtools_note(report)) if note]
 
 
 def _parameter_rows(report: Report) -> list[tuple[str, str]]:
@@ -397,7 +406,9 @@ def _divider() -> None:
 
 def render(report: Report) -> None:
     """Top-level results renderer."""
-    for note in _warnings(report):
+    if note := _insert_note(report):
+        st.toast(note, icon="\u26a0\ufe0f")
+    if note := _samtools_note(report):
         st.warning(note)
     figs = _build_figures(report)
     for label, fig in figs:
