@@ -1,7 +1,7 @@
 """Tabulation of an MSA into base/amino-acid counts and haplotypes.
 
-All functions are pure (NumPy/pandas only) and operate on an ``msa`` mapping of
-``name -> aligned sequence`` where one entry is the reference row (``ref_name``).
+Pure NumPy/pandas over an ``msa`` mapping ``name -> aligned sequence``, one
+entry of which is the reference row (``ref_name``).
 """
 
 from __future__ import annotations
@@ -21,9 +21,7 @@ def counts_from_msa_ref_columns(msa: dict[str, str], ref_name: str = "REF",
                                 ignore_terminal_gaps: bool = True):
     """Per-position base counts/frequencies on reference columns (REF != '-').
 
-    When ``ignore_terminal_gaps`` is True, '-' outside a read's covered span
-    (before its first / after its last non-gap base) is not counted.
-
+    With ``ignore_terminal_gaps``, '-' outside a read's covered span is skipped.
     Returns ``(df_counts, df_freq, ref_cols, coverage)``.
     """
     alphabet = list(alphabet)
@@ -32,34 +30,41 @@ def counts_from_msa_ref_columns(msa: dict[str, str], ref_name: str = "REF",
     ref = msa[ref_name]
     aln_len = len(ref)
     ref_cols = [i for i, ch in enumerate(ref) if ch != '-']
+    cols = np.asarray(ref_cols, dtype=np.intp)
     L = len(ref_cols)
+
+    # Byte -> alphabet slot, so each read is bucketed in one vectorised lookup.
+    lut = np.full(256, alpha_idx['other'], dtype=np.intp)
+    for base in "ACGTN-":
+        if base in alpha_idx:
+            lut[ord(base)] = alpha_idx[base]
 
     counts = np.zeros((L, len(alphabet)), dtype=np.int64)
     coverage = np.zeros(L, dtype=np.int64)
+    gap = ord('-')
 
     for name, row in msa.items():
         if name == ref_name:
             continue
         assert len(row) == aln_len
-        r = [row[c].upper() for c in ref_cols]
+        # latin-1 keeps one byte per character, so any stray symbol still lines
+        # up with its column and falls through to 'other'.
+        r = np.frombuffer(row.upper().encode("latin-1", "replace"),
+                          dtype=np.uint8)[cols]
 
         if ignore_terminal_gaps:
-            left = next((i for i, ch in enumerate(r) if ch != '-'), None)
-            right = (len(r) - 1 - next((i for i, ch in enumerate(reversed(r)) if ch != '-'), 0)
-                     if any(ch != '-' for ch in r) else None)
+            seen = np.flatnonzero(r != gap)
+            if not seen.size:
+                continue
+            left, right = int(seen[0]), int(seen[-1])
         else:
             left, right = 0, L - 1
-
-        if left is None or right is None or right < left:
+        if right < left:
             continue
 
-        for i in range(left, right + 1):
-            b = r[i]
-            if   b in "ACGT": counts[i, alpha_idx[b]] += 1
-            elif b == '-':    counts[i, alpha_idx['-']] += 1
-            elif b == 'N':    counts[i, alpha_idx['N']] += 1
-            else:             counts[i, alpha_idx['other']] += 1
-            coverage[i] += 1
+        span = np.arange(left, right + 1)
+        counts[span, lut[r[left:right + 1]]] += 1
+        coverage[left:right + 1] += 1
 
     df_counts = pd.DataFrame(counts, columns=alphabet, index=np.arange(1, L + 1))
     df_counts.index.name = "position"
@@ -71,11 +76,9 @@ def counts_from_msa_ref_columns(msa: dict[str, str], ref_name: str = "REF",
 
 def reference_match_percent(df_counts: pd.DataFrame, ref_seq: str,
                             gap_char: str = "-") -> np.ndarray:
-    """Per reference-column percentage of non-gap reads carrying the reference base.
+    """Percentage of non-gap reads carrying the reference base, per column.
 
-    Aligned to ``df_counts`` rows (1-based reference positions); gaps are excluded
-    from the denominator. This is the 'reference match %' series drawn by
-    :func:`libraont.plots.gap_match_figure`.
+    Aligned to ``df_counts`` rows; gaps are out of the denominator.
     """
     L = len(df_counts)
     ref_seq = (ref_seq or "").upper()[:L]
@@ -92,8 +95,8 @@ def reference_match_percent(df_counts: pd.DataFrame, ref_seq: str,
 
 def detect_variable_codons(df_counts: pd.DataFrame, ref_seq: str, min_match_pct: float,
                            gap_char: str = "-", frame_offset: int = 0) -> list[int]:
-    """1-based codon positions containing any nucleotide whose reference-match %
-    falls below ``min_match_pct`` (frame-aligned to :func:`aa_counts_from_msa`)."""
+    """1-based codon positions holding a nucleotide below ``min_match_pct``
+    reference match, frame-aligned to :func:`aa_counts_from_msa`."""
     match_perc = reference_match_percent(df_counts, ref_seq, gap_char)
     codons = {(j - frame_offset) // 3 + 1
               for j, mp in enumerate(match_perc)
@@ -102,8 +105,7 @@ def detect_variable_codons(df_counts: pd.DataFrame, ref_seq: str, min_match_pct:
 
 
 def _aa_from_triplet(b0: str, b1: str, b2: str) -> str | None:
-    """Translate one codon, or ``None`` if it has a gap/ambiguous base or no
-    entry in the genetic code."""
+    """Translate one codon; ``None`` if gapped, ambiguous or not in the code."""
     if '-' in (b0, b1, b2) or any(b not in "ACGT" for b in (b0, b1, b2)):
         return None
     return GENETIC_CODE.get(b0 + b1 + b2)
@@ -155,14 +157,49 @@ def get_ref_codons(msa: dict[str, str], ref_name: str = "REF") -> list[tuple[int
     return ref_codons
 
 
-def haplotype_counts(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
-                     positions, ref_name: str = "REF") -> pd.DataFrame:
-    """Count unique AA combinations across the given 1-based codon positions.
+def read_codon_calls(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
+                     positions, ref_name: str = "REF"
+                     ) -> dict[str, tuple[str | None, ...]]:
+    """Per read, the amino acid at each of ``positions``; ``None`` where the
+    codon cannot be read. Kept position-by-position rather than collapsed, so a
+    single readable non-reference codon can still settle a read as a variant."""
+    pos0 = [p - 1 for p in positions if 1 <= p <= len(ref_codons)]
+    out: dict[str, tuple[str | None, ...]] = {}
+    for name, row in msa.items():
+        if name == ref_name:
+            continue
+        calls = []
+        for p0 in pos0:
+            c0, c1, c2 = ref_codons[p0]
+            calls.append(_aa_from_triplet(row[c0].upper(), row[c1].upper(),
+                                          row[c2].upper()))
+        out[name] = tuple(calls)
+    return out
 
-    A read contributes only if it has a valid AA call at *all* requested positions.
-    Returns columns ``combo_label, combo_tuple, count, is_reference, aa_hamming_distance``
-    (descending by count).
-    """
+
+def read_haplotypes(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
+                    positions, ref_name: str = "REF", *, unknown: str = "?",
+                    max_unknown: int = 0) -> dict[str, tuple | None]:
+    """Per read, the AA tuple across ``positions``, or ``None`` when more than
+    ``max_unknown`` of them cannot be read. Codons that cannot be read carry
+    ``unknown``; at the default of 0 that never happens and only reads called at
+    every position keep a haplotype."""
+    out: dict[str, tuple | None] = {}
+    for name, calls in read_codon_calls(msa, ref_codons, positions,
+                                        ref_name).items():
+        out[name] = (tuple(c if c is not None else unknown for c in calls)
+                     if sum(c is None for c in calls) <= max_unknown else None)
+    return out
+
+
+def haplotype_counts(msa: dict[str, str], ref_codons: list[tuple[int, int, int]],
+                     positions, ref_name: str = "REF", *, unknown: str = "?",
+                     max_unknown: int = 0) -> pd.DataFrame:
+    """Unique AA combinations across the given 1-based codon positions, from
+    reads missing at most ``max_unknown`` of them. A codon that cannot be read
+    carries ``unknown`` and counts as a residue in its own right. Columns:
+    ``combo_label, combo_tuple, count, is_reference, aa_hamming_distance``,
+    descending by count."""
     cols = ["combo_label", "combo_tuple", "count", "is_reference", "aa_hamming_distance"]
     pos_ok = [p for p in positions if 1 <= p <= len(ref_codons)]
     if not pos_ok:
@@ -180,20 +217,11 @@ def haplotype_counts(msa: dict[str, str], ref_codons: list[tuple[int, int, int]]
         ref_hap.append(aa)
     ref_tuple = tuple(ref_hap) if ref_ok else None
 
-    ctr: Counter = Counter()
-    for name, row in msa.items():
-        if name == ref_name:
-            continue
-        hap, ok = [], True
-        for p0 in pos0:
-            c0, c1, c2 = ref_codons[p0]
-            aa = _aa_from_triplet(row[c0].upper(), row[c1].upper(), row[c2].upper())
-            if aa is None:
-                ok = False
-                break
-            hap.append(aa)
-        if ok:
-            ctr[tuple(hap)] += 1
+    ctr: Counter = Counter(
+        hap for hap in read_haplotypes(msa, ref_codons, pos_ok, ref_name,
+                                       unknown=unknown,
+                                       max_unknown=max_unknown).values()
+        if hap is not None)
 
     if not ctr:
         return pd.DataFrame(columns=cols)
@@ -211,13 +239,11 @@ def haplotype_counts(msa: dict[str, str], ref_codons: list[tuple[int, int, int]]
 
 
 def haplotype_gini(hap_df: pd.DataFrame) -> float:
-    """Gini coefficient of the haplotype count distribution.
-    ~0: even; ~1: dominated by a few combos."""
+    """Gini of the haplotype counts: ~0 even, ~1 dominated by a few combos."""
     if hap_df.empty:
         return float("nan")
     counts = np.sort(hap_df["count"].values)
     lorenz_y = np.concatenate([[0], counts.cumsum() / counts.sum()])
     lorenz_x = np.linspace(0, 1, len(lorenz_y))
-    # np.trapz was renamed to np.trapezoid in NumPy 2.0 (and removed under the old name).
-    trapezoid = getattr(np, "trapezoid", None) or np.trapz
+    trapezoid = getattr(np, "trapezoid", None) or np.trapz   # renamed in NumPy 2
     return float(1 - 2 * trapezoid(lorenz_y, lorenz_x))

@@ -7,6 +7,9 @@ lives in the ``libraont`` package; this file only wires the UI together.
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
+
 import streamlit as st
 
 from libraont import theme  # noqa: F401  (activates the shared Plotly template)
@@ -22,6 +25,27 @@ st.markdown(
     "base/AA composition and variant diversity.</p>",
     unsafe_allow_html=True,
 )
+
+_SCHEMATIC = Path(__file__).parent / "docs" / "workflow"
+
+
+def _figure(name: str, alt: str, width: str = "100%") -> None:
+    """Embed a schematic as a data URI - Streamlit's markdown sanitiser strips
+    attributes from a raw <svg>, but leaves an <img> alone."""
+    path = _SCHEMATIC / name
+    if not path.is_file():
+        return
+    uri = base64.b64encode(path.read_bytes()).decode("ascii")
+    st.markdown(f"<img src='data:image/svg+xml;base64,{uri}' "
+                f"style='width:{width};height:auto' alt='{alt}'>",
+                unsafe_allow_html=True)
+
+
+with st.expander("How a read becomes a number", expanded=False):
+    _figure("workflow.svg", "LibraONT workflow")
+    st.caption("Bar widths are illustrative; the counts for this run are in the "
+               "**Library FASTQ read processing** plot below.")
+    _figure("criteria.svg", "LibraONT classification rules", width="60%")
 
 params, run_clicked, error = inputs.render_sidebar()
 

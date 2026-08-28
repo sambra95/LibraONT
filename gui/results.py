@@ -13,29 +13,37 @@ import streamlit as st
 
 from libraont import plots, theme
 from libraont.alignment import tool_versions
-from libraont.analysis import haplotype_gini
 from libraont.pipeline import Report
 from libraont.sequences import clean_sequence
 
 
 def _build_figures(report: Report) -> list[tuple[str, object]]:
-    """Ordered (title, figure) pairs in report layout order."""
+    """Ordered (title, figure) pairs: raw reads, then their alignment, then the
+    composition that follows from it. Everything below the composition describes
+    the correctly assembled reads only."""
     p = report.params
     figs: list[tuple[str, object]] = [
+        ("Read processing", plots.read_funnel_sankey_figure(
+            report.funnel, report.fates,
+            p.structural_insertion_bp, p.structural_deletion_bp)),
+        ("Read quality", plots.read_quality_figure(report.phred_counts, p.min_phred)),
         ("Read lengths", plots.read_length_figure(
             report.length_counts, p.min_read_len, p.max_read_len,
             plasmid_len=len(clean_sequence(p.plasmid_seq)) if p.plasmid_seq else None)),
     ]
-    if report.coverage is not None:
-        figs.append(("Read alignment map", plots.read_alignment_figure(report.coverage)))
-        figs.append(("Plasmid coverage", plots.coverage_figure(report.coverage)))
+    if report.read_map is not None:
+        figs.append(("Read alignment map",
+                     plots.read_alignment_figure(report.read_map, report.target,
+                                                 p.structural_insertion_bp,
+                                                 p.structural_deletion_bp,
+                                                 p.auto_codon_match_pct)))
     figs.append(("Gap & match %", plots.gap_match_figure(
         report.df_counts, ref_seq=report.target[:len(report.df_counts)],
         shade_codons=report.valid_positions or None, frame_offset=0,
-        min_identity=p.min_identity, auto_match_threshold=p.auto_codon_match_pct,
+        auto_match_threshold=p.auto_codon_match_pct,
         aa_counts=report.df_aa_counts,
         reads_passing=report.n_reads_kept,
-        reads_total=sum(report.length_counts.values()))))
+        reads_total=report.projection.n_mapped)))
 
     if report.valid_positions:
         aa_fig = plots.aa_pies_figure(
@@ -45,55 +53,56 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
         if report.hap_df is not None:
             figs.append(("Variant treemap", plots.haplotype_treemap_figure(
                 report.hap_df, aa_counts=report.df_aa_counts,
-                positions=report.valid_positions, min_frac=p.pie_min_frac,
-                include_rare=p.include_rare_variants)))
+                positions=report.valid_positions, min_frac=p.pie_min_frac)))
     return figs
 
 
-def _stat_card(label: str, value: str, *, sub: str = "") -> str:
-    """One summary statistic as a styled HTML 'card' (rendered in a flex row)."""
+# Card geometry: the big summary row, and the compact per-plot key.
+_CARD_LARGE = dict(box="flex:1 1 0;min-width:130px;", radius=12, pad="14px 16px",
+                   shadow="box-shadow:0 1px 2px rgba(0,0,0,0.05)", label="0.72rem",
+                   value="1.7rem", line="1.15", gap=4, sub="0.72rem", sub_gap=3)
+_CARD_COMPACT = dict(box="flex:0 1 170px;", radius=8, pad="9px 12px", shadow="",
+                     label="0.68rem", value="1.15rem", line="1.2", gap=2,
+                     sub="0.7rem", sub_gap=2)
+
+
+def _card(label: str, value: str, sub: str, accent: str, s: dict) -> str:
+    """One statistic as a styled HTML card, laid out to the preset ``s``."""
     pal = theme.PALETTE
-    accent = pal["primary"]
-    label = html.escape(str(label))
-    value = html.escape(str(value))
-    sub = html.escape(str(sub))
-    sub_html = (f"<div style='font-size:0.72rem;color:{pal['muted']};margin-top:3px'>"
-                f"{sub}</div>") if sub else ""
+    sub_html = (f"<div style='font-size:{s['sub']};color:{pal['muted']};"
+                f"margin-top:{s['sub_gap']}px'>{html.escape(sub)}</div>") if sub else ""
     return (
-        f"<div style='flex:1 1 0;min-width:130px;background:{pal['surface']};"
-        f"border:1px solid {pal['grid']};border-top:3px solid {accent};border-radius:12px;"
-        f"padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,0.05)'>"
-        f"<div style='font-size:0.72rem;font-weight:600;letter-spacing:0.04em;"
-        f"text-transform:uppercase;color:{pal['muted']}'>{label}</div>"
-        f"<div style='font-size:1.7rem;font-weight:700;line-height:1.15;margin-top:4px;"
-        f"color:{pal['primary_dark']}'>{value}</div>"
+        f"<div style='{s['box']}background:{pal['surface']};"
+        f"border:1px solid {pal['grid']};border-top:3px solid {accent};"
+        f"border-radius:{s['radius']}px;padding:{s['pad']}"
+        f"{';' + s['shadow'] if s['shadow'] else ''}'>"
+        f"<div style='font-size:{s['label']};font-weight:600;letter-spacing:0.04em;"
+        f"text-transform:uppercase;color:{pal['muted']}'>{html.escape(label)}</div>"
+        f"<div style='font-size:{s['value']};font-weight:700;line-height:{s['line']};"
+        f"margin-top:{s['gap']}px;color:{pal['primary_dark']}'>{html.escape(value)}</div>"
         f"{sub_html}</div>")
 
 
+def _stat_card(label: str, value: str, *, sub: str = "", accent: str = "") -> str:
+    """One summary statistic, for the big flex row at the top of the report."""
+    return _card(str(label), str(value), str(sub),
+                 accent or theme.PALETTE["primary"], _CARD_LARGE)
+
+
 def _metric_cards_html(cards: list[dict]) -> str:
+    """Metric cards as a wrapping flex row.
+
+    ``color`` on a card overrides the accent, since these double as the colour
+    key for plots that carry no legend.
+    """
     if not cards:
         return ""
-
-    pal = theme.PALETTE
-    html_cards = []
-    for card in cards:
-        label = html.escape(str(card.get("label", "")))
-        value = html.escape(str(card.get("value", "")))
-        sub = html.escape(str(card.get("sub", "")))
-        accent = pal["primary"]
-        sub_html = (f"<div style='font-size:0.7rem;color:{pal['muted']};margin-top:2px'>"
-                    f"{sub}</div>") if sub else ""
-        html_cards.append(
-            f"<div style='flex:0 1 170px;background:{pal['surface']};"
-            f"border:1px solid {pal['grid']};border-top:3px solid {accent};"
-            f"border-radius:8px;padding:9px 12px'>"
-            f"<div style='font-size:0.68rem;font-weight:600;letter-spacing:0.04em;"
-            f"text-transform:uppercase;color:{pal['muted']}'>{label}</div>"
-            f"<div style='font-size:1.15rem;font-weight:700;line-height:1.2;margin-top:2px;"
-            f"color:{pal['primary_dark']}'>{value}</div>"
-            f"{sub_html}</div>")
     return ("<div class='metric-cards' style='display:flex;gap:10px;flex-wrap:wrap;"
-            "margin:-4px 0 10px'>" + "".join(html_cards) + "</div>")
+            "margin:-4px 0 10px'>" + "".join(
+                _card(str(c.get("label", "")), str(c.get("value", "")),
+                      str(c.get("sub", "")),
+                      c.get("color") or theme.PALETTE["primary"], _CARD_COMPACT)
+                for c in cards) + "</div>")
 
 
 def _figure_meta(fig: go.Figure) -> dict:
@@ -102,39 +111,39 @@ def _figure_meta(fig: go.Figure) -> dict:
 
 
 def _figure_metric_cards(fig: go.Figure) -> None:
-    """Render compact cards for metrics supplied in ``fig.layout.meta``."""
-    html_cards = _metric_cards_html(_figure_meta(fig).get("metric_cards") or [])
-    if html_cards:
-        st.markdown(html_cards, unsafe_allow_html=True)
+    """Compact cards for the metrics in ``fig.layout.meta``."""
+    if cards := _metric_cards_html(_figure_meta(fig).get("metric_cards") or []):
+        st.markdown(cards, unsafe_allow_html=True)
 
 
 def _figure_description_text(fig: go.Figure) -> str:
-    """Return a short plot-specific interpretation note, when provided."""
+    """The plot's interpretation note, if it carries one."""
     return str(_figure_meta(fig).get("description") or "")
 
 
 def _figure_description(fig: go.Figure) -> None:
-    """Render a short plot-specific interpretation note, when provided."""
-    description = _figure_description_text(fig)
-    if description:
+    if description := _figure_description_text(fig):
         st.caption(description)
 
 
 def _summary_cards(report: Report) -> list[str]:
     """Summary card HTML shared by Streamlit rendering and HTML export."""
-    if report.hap_df is not None and not report.hap_df.empty:
-        variants, var_sub = f"{len(report.hap_df):,}", f"Gini {haplotype_gini(report.hap_df):.3f}"
-    else:
-        variants, var_sub = "-", "no codon positions"
-
+    insert = len(report.target)
+    codons, spare = divmod(insert, 3)
+    plasmid = clean_sequence(report.params.plasmid_seq or "")
     return [
-        _stat_card("Total reads", f"{sum(report.length_counts.values()):,}",
-                   sub=f"{report.n_reads_kept:,} kept"),
-        _stat_card("Mean Phred", f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
-                   sub="kept reads"),
-        _stat_card("Insert length", f"{len(report.target):,} bp"),
-        _stat_card("Codons", f"{report.df_aa_counts.shape[0]:,}"),
-        _stat_card("Unique variants", variants, sub=var_sub),
+        _stat_card("Total reads", f"{sum(report.length_counts.values()):,}"),
+        _stat_card("Mean Phred",
+                   f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
+                   sub="all reads"),
+        _stat_card("Insert length", f"{insert:,} bp",
+                   sub=f"not a whole number of codons - {spare} spare "
+                       f"base{'' if spare == 1 else 's'}" if spare else "",
+                   accent=theme.PALETTE["danger"] if spare else ""),
+        _stat_card("Plasmid length", f"{len(plasmid):,} bp" if plasmid else "-"),
+        _stat_card("Codons",
+                   f"{codons:,}" + (f" + {spare} bp \u26a0\ufe0f" if spare else ""),
+                   accent=theme.PALETTE["danger"] if spare else ""),
     ]
 
 
@@ -160,17 +169,37 @@ def _parameter_rows(report: Report) -> list[tuple[str, str]]:
         ("Insert Region", f"{p.start_pos}-{p.stop_pos} (length {len(report.target):,} bp)"),
         ("Plasmid reference", "Yes" if p.plasmid_seq else "No"),
         ("Read length range", read_len_range),
-        ("Read identity cutoff", f"{p.min_identity:.2f}"),
-        ("Trim padding", f"{p.pad:,} bp"),
+        ("Minimum read quality",
+         f"Q{p.min_phred}" if p.min_phred is not None else "No filtering"),
+        ("Structural insertion threshold", f"≥ {p.structural_insertion_bp} bp"),
+        ("Structural deletion threshold", f"≥ {p.structural_deletion_bp} bp"),
+        ("Discarded, no alignment to reference", f"{report.n_discarded_unaligned:,}"),
+        ("Correctly assembled reads",
+         f"{report.n_assembled:,} of {report.n_spanning:,} spanning the insert"),
+        ("Reads used for composition", f"{report.n_intact:,}"),
         ("Identified Variable Codons", ", ".join(map(str, report.valid_positions)) or "None"),
         ("Variable Codon Detection Threshold",
          f"< {p.auto_codon_match_pct:g}% match" if p.auto_codon_match_pct is not None else "Off"),
-        ("Min pie-slice fraction", f"{p.pie_min_frac:.2f}"),
-        ("Include rare variants", "Yes" if p.include_rare_variants else "No"),
-        ("MAFFT version", tools.get("mafft") or "-"),
+        ("Grouping threshold", f"{p.pie_min_frac:.3f}"),
         ("minimap2 version", tools.get("minimap2") or "-"),
         ("samtools version", tools.get("samtools") or "-"),
     ]
+
+
+def _funnel_html(report: Report) -> str:
+    """Stage-by-stage read accounting for the downloaded report."""
+    rows = "".join(
+        f"<tr><th>{html.escape(s.label)}</th><td>{s.count:,}</td>"
+        f"<td>{html.escape(s.detail)}</td>"
+        f"<td>{html.escape(', '.join(s.used_by) or '-')}</td></tr>"
+        for s in report.funnel)
+    return (
+        "<section class='parameter-summary'><h2>Read filtering</h2>"
+        "<p class='caption'>How many reads survive each step, and which outputs "
+        "are built from each.</p>"
+        "<table class='parameter-table'><tbody>"
+        "<tr><th>Step</th><td><b>Reads</b></td><td><b>Rule</b></td>"
+        "<td><b>Used by</b></td></tr>" + rows + "</tbody></table></section>")
 
 
 def _parameters_html(report: Report) -> str:
@@ -245,22 +274,22 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
     """Standalone HTML rendering of the main results section with static plot images."""
     pal = theme.PALETTE
     warning = ""
-    if report.params.plasmid_seq and report.coverage is None:
+    if report.params.plasmid_seq and report.read_map is None:
         warning = (
-            "<div class='warning'>Coverage plot skipped - minimap2 and samtools were "
-            "not found on PATH.</div>")
+            "<div class='warning'>Read alignment map skipped - samtools was not "
+            "found on PATH.</div>")
 
     sections = []
     for label, fig in figs:
         title = html.escape(str(fig.layout.title.text or label))
         description = html.escape(_figure_description_text(fig))
         caption = f"<p class='caption'>{description}</p>" if description else ""
-        metric_cards = _metric_cards_html(_figure_meta(fig).get("metric_cards") or [])
+        cards = _figure_meta(fig).get("metric_cards") or []
         image_uri = _figure_png_data_uri(fig)
+        body = (_metric_cards_html(cards)
+                + f"<div class='plot'><img src='{image_uri}' alt='{title}'></div>")
         sections.append(
-            f"<section class='plot-section'><h2>{title}</h2>{caption}"
-            f"{metric_cards}<div class='plot'><img src='{image_uri}' alt='{title}'></div>"
-            f"</section>")
+            f"<section class='plot-section'><h2>{title}</h2>{caption}{body}</section>")
 
     return f"""<!doctype html>
 <html lang="en">
@@ -376,6 +405,8 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
     }}
     .plot {{
       margin-top: 4px;
+      flex: 3 1 0;
+      min-width: 0;
     }}
     .plot img {{
       display: block;
@@ -391,6 +422,7 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
     <div class="summary-cards">{''.join(_summary_cards(report))}</div>
     {warning}
     {_parameters_html(report)}
+    {_funnel_html(report)}
     {_sequences_html(report)}
     {''.join(sections)}
   </main>
@@ -400,7 +432,7 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
 
 def _build_html(report: Report,
                 figs: list[tuple[str, object]]) -> tuple[str, bytes]:
-    """Render the results section to a standalone HTML file (name, bytes)."""
+    """The results section as a standalone HTML file: (name, bytes)."""
     return (f"ANALYSIS_{_fastq_download_name(report)}.html",
             _html_report(report, figs).encode("utf-8"))
 
@@ -424,7 +456,7 @@ def _build_tables_zip(report: Report) -> bytes:
 
 
 def _downloads(report: Report, figs: list[tuple[str, object]]) -> None:
-    """Generate the HTML report and data-table ZIP fresh, and offer both downloads."""
+    """Build the HTML report and table ZIP fresh, and offer both."""
     st.subheader("Downloads")
     st.caption("Download a static HTML report for sharing, or export the underlying data tables "
                "as CSV files in a ZIP archive.")
@@ -450,23 +482,21 @@ def render(report: Report) -> None:
     """Top-level results renderer."""
     _summary(report)
 
-    if report.params.plasmid_seq and report.coverage is None:
-        st.warning("Coverage plot skipped - minimap2 and samtools were not found on "
-                   "PATH (activate the `libraont` conda environment).")
+    if report.params.plasmid_seq and report.read_map is None:
+        st.warning("Read alignment map skipped - samtools was not found on PATH "
+                   "(activate the `libraont` conda environment).")
+    spanning, assembled = report.n_spanning, report.n_assembled
 
     figs = _build_figures(report)
     for label, fig in figs:
-        # Show the figure's descriptive title as the heading above the plot; render
-        # a title-less copy so the heading is not duplicated inside the chart.
-        # (Use "" not None - a null title renders as the literal "undefined".)
+        # Title as the heading, and a title-less copy below it so it is not shown
+        # twice. Use "" not None: a null title renders as literal "undefined".
         st.subheader(fig.layout.title.text or label)
         _figure_description(fig)
+        chart = go.Figure(fig).update_layout(title_text="")
+        config = {"toImageButtonOptions": {"format": "svg"}}
         _figure_metric_cards(fig)
-        st.plotly_chart(
-            go.Figure(fig).update_layout(title_text=""),
-            use_container_width=True,
-            config={"toImageButtonOptions": {"format": "svg"}},
-        )
+        st.plotly_chart(chart, use_container_width=True, config=config)
 
     _tables(report)
     _downloads(report, figs)

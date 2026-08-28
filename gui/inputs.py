@@ -8,44 +8,37 @@ import tempfile
 import streamlit as st
 
 from libraont import alignment
-from libraont.constants import (DEFAULT_MIN_IDENTITY, DEFAULT_PAD,
-                                DEFAULT_PIE_MIN_FRAC)
+from libraont.constants import (DEFAULT_PIE_MIN_FRAC, DEFAULT_STRUCTURAL_DELETION_BP,
+                                DEFAULT_STRUCTURAL_INSERTION_BP)
 from libraont.pipeline import AnalysisParams
-from libraont.sequences import clean_sequence, read_length_range
+from libraont.sequences import clean_sequence, fastq_ranges
 
 
 @st.cache_data(show_spinner=False)
-def _cached_length_range(path: str, key: tuple) -> tuple[int, int] | None:
-    """Min/max raw read length in the FASTQ, cached per upload (``key``)."""
-    return read_length_range(path)
+def _cached_ranges(path: str, key: tuple):
+    """Read-length and per-read Phred ranges in the FASTQ, cached per upload."""
+    return fastq_ranges(path)
 
 
-_TOOL_LABELS = {"mafft": "MAFFT", "minimap2": "minimap2", "samtools": "samtools"}
+_TOOL_LABELS = {"minimap2": "minimap2", "samtools": "samtools"}
 
 _TOOL_DESCRIPTIONS = {
-    "mafft": "Reference-anchored multiple alignment of the reads - the backbone for "
-             "base/AA composition, variable-codon detection and the variant treemap.",
-    "minimap2": "Maps reads to the whole plasmid (ONT preset) for the coverage plot.",
-    "samtools": "Sorts and indexes the minimap2 alignments and computes per-base depth "
-                "for the coverage plot.",
+    "minimap2": "Required. Aligns every read - the basis for each plot and table.",
+    "samtools": "Optional. Backs the read alignment map.",
 }
 
 
 def _resolve_fastq() -> tuple[str | None, str | None]:
-    """Return a readable path and original filename for the single uploaded FASTQ.
-
-    Only one file may be uploaded; uploading a new one replaces the previous -
-    its temp copy is deleted first so a stale FASTQ never lingers on disk.
-    """
+    """Path and original filename for the uploaded FASTQ. A new upload replaces
+    the previous one, deleting its temp copy first."""
     upload = st.file_uploader(
         "FASTQ file", type=["fastq", "fq", "gz"], accept_multiple_files=False,
-        help="Upload a single nanopore read set (.fastq or .fastq.gz). "
-             "Uploading a new file replaces the current one.")
+        help="One nanopore read set (.fastq/.fastq.gz). A new upload replaces it.")
     if upload is None:
         return None, None
 
-    # Persist the upload to one temp file, reused across reruns. A different
-    # upload (by name/size) overwrites it; the old temp file is removed first.
+    # One temp file, reused across reruns; a different upload (by name/size)
+    # replaces it.
     cached = st.session_state.get("_fastq_upload")
     key = (upload.name, upload.size)
     if not cached or cached["key"] != key:
@@ -73,8 +66,8 @@ def _parse_positions(text: str) -> list[int]:
 def _tool_status() -> None:
     """Read-only detection status for the external tools (found on PATH or not)."""
     with st.expander("External tools", expanded=False):
-        st.caption("Detected on PATH by the active environment. A missing tool means "
-                   "the `libraont` conda environment is not active.")
+        st.caption("Detected on PATH. A missing tool means the `libraont` "
+                   "environment is not active.")
         versions = alignment.tool_versions()
         for name, label in _TOOL_LABELS.items():
             version = versions.get(name)
@@ -92,91 +85,112 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         gene_seq = st.text_area("Gene sequence", height=120,
                                 help="Original gene (A/C/G/T/N, case-insensitive).")
         plasmid_seq = st.text_area("Plasmid sequence (optional)", height=80,
-                                   help="Full plasmid; enables the coverage plot. Must "
-                                        "include the target/gene sequence, which is located "
-                                        "within the plasmid to place it on the coverage plot.")
+                                   help="Full plasmid, including the gene above. "
+                                        "Enables the read alignment map.")
 
         gene_len = len(clean_sequence(gene_seq)) if gene_seq else 0
 
         st.subheader("Initial data analysis")
-        st.caption("Applied once when aligning and filtering reads. Changing any "
-                   "of these re-runs the analysis and affects every plot and table.")
+        st.caption("Applied when reads are filtered and aligned; changing any of "
+                   "these re-runs the analysis.")
         full = st.checkbox("Use full gene length", value=True,
-                           help="Analyse the whole gene. Uncheck to restrict the "
-                                "analysis to a sub-region (e.g. a single domain).")
-        if full:
-            start_pos, stop_pos = 1, max(gene_len, 1)
-        else:
-            c1, c2 = st.columns(2)
-            start_pos = c1.number_input("Start (1-based)", min_value=1,
-                                        max_value=max(gene_len, 1), value=1,
-                                        help="First base of the region of interest "
-                                             "(1-based, inclusive).")
-            stop_pos = c2.number_input("Stop (inclusive)", min_value=1,
-                                       max_value=max(gene_len, 1), value=max(gene_len, 1),
-                                       help="Last base of the region of interest (inclusive).")
+                           help="Uncheck to analyse a sub-region (e.g. one domain).")
+        # Shown either way, but frozen on the whole gene while that box is
+        # ticked - the value has to be written before the widget is built.
+        end = max(gene_len, 1)
+        for key, default in (("roi_start", 1), ("roi_stop", end)):
+            st.session_state[key] = (default if full else
+                                     min(max(st.session_state.get(key, default), 1), end))
+        c1, c2 = st.columns(2)
+        start_pos = c1.number_input("Start (1-based)", min_value=1, max_value=end,
+                                    key="roi_start", disabled=full,
+                                    help="First base of the region (1-based).")
+        stop_pos = c2.number_input("Stop (inclusive)", min_value=1, max_value=end,
+                                   key="roi_stop", disabled=full,
+                                   help="Last base of the region (inclusive).")
 
-        pad = st.number_input("Padding (bp)", min_value=0, value=DEFAULT_PAD, step=10,
-                              help="Extra bases kept on each side of the matched region "
-                                   "when trimming each read. Increase to retain flanks.")
-
-        # Read-length window, bounded and defaulted to the range actually present
-        # in the uploaded FASTQ. Reads outside the selected window are discarded
-        # before alignment.
-        min_read_len = max_read_len = None
+        # Length window, defaulted to the range present in the FASTQ. Shown even
+        # before there is one, so the control does not appear and disappear.
         cached_upload = st.session_state.get("_fastq_upload")
-        if fastq_path and cached_upload:
-            rng = _cached_length_range(fastq_path, cached_upload["key"])
-            if rng and rng[0] < rng[1]:
-                lo, hi = rng
-                min_read_len, max_read_len = st.slider(
-                    "Read length range (bp)", lo, hi, (lo, hi),
-                    help="Only reads whose length falls within this window are kept. "
-                         "Bounds default to the shortest and longest read in the FASTQ.")
-            elif rng:
-                st.caption(f"All reads are {rng[0]} bp long; no length filtering applied.")
+        ranges = (_cached_ranges(fastq_path, cached_upload["key"])
+                  if fastq_path and cached_upload else None)
+        rng, q_rng = ranges if ranges else (None, None)
+        spread = bool(rng) and rng[0] < rng[1]
+        bounds = rng if spread else (0, 1)
+        window = st.slider(
+            "Read length range (bp)", *bounds, bounds, disabled=not spread,
+            help="Keeps reads within this window. Bounds are the shortest and "
+                 "longest read in the FASTQ.")
+        min_read_len, max_read_len = window if spread else (None, None)
+        if not spread:
+            st.caption(f"All reads are {rng[0]:,} bp long; no length filtering "
+                       "applies." if rng else
+                       "Upload a FASTQ to filter on read length.")
+
+        # Quality cutoff, over the per-read mean Phred range present in the FASTQ.
+        q_spread = bool(q_rng) and q_rng[0] < q_rng[1]
+        q_bounds = q_rng if q_spread else (0, 1)
+        cutoff = st.slider(
+            "Minimum read quality (Phred)", *q_bounds, q_bounds[0], disabled=not q_spread,
+            help="Drops reads averaging below this Phred score. Bounds span the "
+                 "FASTQ, so the bottom keeps every read and the top only the best.")
+        min_phred = int(cutoff) if q_spread else None
+        if not q_spread:
+            st.caption(f"Every read averages Q{q_rng[0]}; no quality "
+                       "filtering applies." if q_rng else
+                       "Upload a FASTQ to filter on read quality.")
+
+        c_ins, c_del = st.columns(2)
+        structural_insertion_bp = c_ins.number_input(
+            "Insertion threshold (bp)", min_value=1, max_value=500,
+            value=DEFAULT_STRUCTURAL_INSERTION_BP, step=1,
+            help="An insertion this large marks a read mis-assembled, excluding "
+                 "it from the composition plots.")
+        structural_deletion_bp = c_del.number_input(
+            "Deletion threshold (bp)", min_value=1, max_value=500,
+            value=DEFAULT_STRUCTURAL_DELETION_BP, step=1,
+            help="As above, for deletions - a library can fail one way only.")
+        st.caption("ONT indel errors run 1-9 bp and real rearrangements are far "
+                   "larger, so anything in ~10-25 bp behaves alike. Reads under "
+                   "both count as correctly assembled.")
 
         st.subheader("Library Analysis settings")
-        st.caption("Adjust the analysis and how results are displayed. The identity "
-                   "filter re-runs the alignment; codon/pie settings update instantly. "
-                   "Codon selection drives the AA-distribution pies and variant treemap "
-                   "(and marks a cutoff on the alignment plot).")
-        min_identity = st.slider(
-            "Minimum identity", 0.0, 1.0, DEFAULT_MIN_IDENTITY, 0.01,
-            help="Minimum identity to the reference insert. Reads that don't align to the "
-                 "insert at or above this are discarded - this is the filter behind the "
-                 "'Alignment to reference insert' plot, and it sets the reads used across "
-                 "the analysis (AA distribution and variant treemap too). Lower it if too "
-                 "few reads pass.")
-        st.caption("Read-level filter: fraction of each read that must match the "
-                   "reference insert for the read to be kept.")
+        st.caption("Which codons count as variable, and how results are displayed. "
+                   "Drives the AA pies and variant treemap.")
         auto_detect = st.toggle(
             "Auto-detect variable codons", value=True,
-            help="Use reference-match % to select codons automatically.")
+            help="Pick variable codons by reference-match %.")
         positions_text = ""
         auto_pct = None
         if auto_detect:
             auto_pct = st.slider(
                 "Minimum identity (%)", 0.0, 100.0, 70.0, 1.0,
-                help="Codons with a position below this reference-match % are added "
-                     "automatically, exactly as if typed into 'Codon positions'. "
-                     "Shown as a cutoff line on the gap/match plot.")
-            st.caption("Codon-level cutoff: codons matching the reference less "
-                       "often than this are treated as variable.")
+                help="Codons matching the reference less often than this are "
+                     "treated as variable. Marked on the gap/match plot.")
         else:
             positions_text = st.text_input(
                 "Codon positions", placeholder="e.g. 16, 129, 231",
-                help="1-based codon positions for AA pies & haplotypes.")
-        pie_min_frac = st.number_input("Grouping threshold", min_value=0.0, max_value=1.0,
-                                       value=DEFAULT_PIE_MIN_FRAC, step=0.01,
-                                       help="AA-distribution plot only: amino acids below "
-                                            "this frequency are folded into a single "
-                                            "'Other' slice.")
-        include_rare_variants = st.toggle(
-            "Include rare variants", value=False,
-            help="Variant treemap only: when off, variants containing an amino acid below the "
-                 "grouping threshold at its codon position (an 'Other' residue) are excluded, "
-                 "and the treemap stats reflect the remaining variants.")
+                help="1-based codon positions for the pies and treemap.")
+        pie_min_frac = st.number_input(
+            "Grouping threshold", min_value=0.0, max_value=1.0,
+            value=DEFAULT_PIE_MIN_FRAC, step=0.01, format="%.3f",
+            help="Amino acids rarer than this are folded into one 'Other' slice, "
+                 "and variants carrying them leave the treemap. 0 keeps everything; "
+                 "~0.01 hides basecall noise.")
+        st.caption("Raising it drops real library members too - in a diverse "
+                   "library every residue is rare.")
+        # Bounded by the worst read of the last run: a higher tolerance than that
+        # cannot admit anything more.
+        worst = getattr(st.session_state.get("report"), "max_unknown_codons", 0)
+        max_unknown_codons = st.slider(
+            "Unknown codons tolerated", 0, worst or 1, 0, disabled=not worst,
+            help="Diversified codons a read may miss and still earn a treemap "
+                 "tile, each written '?' and counted as a residue of its own. "
+                 "0 keeps only fully called reads; the top is the worst read.")
+        if not worst:
+            max_unknown_codons = 0
+            st.caption("Nothing to tolerate: every read covers all the "
+                       "diversified codons, or has none to cover.")
 
         _tool_status()
         run = st.button("Run analysis", type="primary", use_container_width=True)
@@ -195,11 +209,13 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         fastq_path=fastq_path, gene_seq=gene_seq,
         start_pos=int(start_pos), stop_pos=int(stop_pos),
         fastq_name=fastq_name,
-        min_identity=float(min_identity), pad=int(pad),
         min_read_len=int(min_read_len) if min_read_len is not None else None,
         max_read_len=int(max_read_len) if max_read_len is not None else None,
+        min_phred=min_phred,
         plasmid_seq=plasmid_seq.strip() or None,
+        structural_insertion_bp=int(structural_insertion_bp),
+        structural_deletion_bp=int(structural_deletion_bp),
         pie_positions=positions, pie_min_frac=float(pie_min_frac),
-        include_rare_variants=bool(include_rare_variants),
+        max_unknown_codons=int(max_unknown_codons),
         auto_codon_match_pct=float(auto_pct) if auto_pct is not None else None)
     return params, run, None
