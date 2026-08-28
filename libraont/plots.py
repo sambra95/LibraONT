@@ -315,7 +315,6 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
         fig.add_hline(y=auto_match_threshold, row=trace_row, col=1,
                       line=dict(color=theme.PALETTE["muted"], width=1.5,
                                 dash="3px,3px"),
-                      annotation_text="codon detection cutoff",
                       annotation_position="top left",
                       annotation_font=dict(size=10,
                                            color=theme.PALETTE["muted"]))
