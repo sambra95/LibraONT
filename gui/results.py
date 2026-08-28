@@ -56,47 +56,26 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
     return figs
 
 
-def _stat_card(label: str, value: str, *, sub: str = "", accent: str = "") -> str:
-    """One statistic as a styled HTML card, for the report's summary row."""
-    pal = theme.PALETTE
-    sub_html = (f"<div style='font-size:0.72rem;color:{pal['muted']};margin-top:3px'>"
-                f"{html.escape(sub)}</div>") if sub else ""
-    return (
-        f"<div style='flex:1 1 0;min-width:130px;background:{pal['surface']};"
-        f"border:1px solid {pal['grid']};border-radius:12px;padding:14px 16px;"
-        f"border-top:3px solid {accent or pal['primary']};"
-        "box-shadow:0 1px 2px rgba(0,0,0,0.05)'>"
-        f"<div style='font-size:0.72rem;font-weight:600;letter-spacing:0.04em;"
-        f"text-transform:uppercase;color:{pal['muted']}'>{html.escape(label)}</div>"
-        f"<div style='font-size:1.7rem;font-weight:700;line-height:1.15;margin-top:4px;"
-        f"color:{pal['primary_dark']}'>{html.escape(value)}</div>{sub_html}</div>")
-
-
 def _figure_description(fig: go.Figure) -> str:
     """The plot's interpretation note, if it carries one."""
     meta = fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
     return str(meta.get("description") or "")
 
 
-def _summary_cards(report: Report) -> list[str]:
-    """Summary card HTML shared by Streamlit rendering and HTML export."""
-    insert = len(report.target)
-    codons, spare = divmod(insert, 3)
-    plasmid = clean_sequence(report.params.plasmid_seq or "")
-    return [
-        _stat_card("Total reads", f"{sum(report.length_counts.values()):,}"),
-        _stat_card("Mean Phred",
-                   f"{report.mean_phred:.1f}" if report.mean_phred is not None else "-",
-                   sub="all reads"),
-        _stat_card("Insert length", f"{insert:,} bp",
-                   sub=f"not a whole number of codons - {spare} spare "
-                       f"base{'' if spare == 1 else 's'}" if spare else "",
-                   accent=theme.PALETTE["danger"] if spare else ""),
-        _stat_card("Plasmid length", f"{len(plasmid):,} bp" if plasmid else "-"),
-        _stat_card("Codons",
-                   f"{codons:,}" + (f" + {spare} bp \u26a0\ufe0f" if spare else ""),
-                   accent=theme.PALETTE["danger"] if spare else ""),
-    ]
+def _warnings(report: Report) -> list[str]:
+    """Caveats shown above the results, in the app and in the report."""
+    notes = []
+    codons, spare = divmod(len(report.target), 3)
+    if spare:      # trailing bases never form a codon, so they are dropped
+        notes.append(
+            f"Insert is {len(report.target):,} bp - not a whole number of codons "
+            f"({codons:,} codons + {spare} spare base{'' if spare == 1 else 's'}). "
+            f"The spare base{' is' if spare == 1 else 's are'} dropped from the "
+            "codon and amino-acid analysis; check the start and stop positions.")
+    if report.params.plasmid_seq and report.read_map is None:
+        notes.append("Read alignment map skipped - samtools was not found on PATH "
+                     "(activate the `libraont` conda environment).")
+    return notes
 
 
 def _parameter_rows(report: Report) -> list[tuple[str, str]]:
@@ -109,10 +88,14 @@ def _parameter_rows(report: Report) -> list[tuple[str, str]]:
         read_len_range = f"{lo}-{hi} bp"
     else:
         read_len_range = "No filtering"
+    plasmid = clean_sequence(p.plasmid_seq or "")
     return [
         ("Input FASTQ", _fastq_download_name(report)),
+        ("Reads in FASTQ", f"{sum(report.length_counts.values()):,}"),
+        ("Mean Phred", f"{report.mean_phred:.1f}" if report.mean_phred is not None
+                       else "-"),
         ("Insert Region", f"{p.start_pos}-{p.stop_pos} (length {len(report.target):,} bp)"),
-        ("Plasmid reference", "Yes" if p.plasmid_seq else "No"),
+        ("Plasmid reference", f"{len(plasmid):,} bp" if plasmid else "No"),
         ("Read length range", read_len_range),
         ("Minimum read quality",
          f"Q{p.min_phred}" if p.min_phred is not None else "No filtering"),
@@ -139,7 +122,7 @@ def _funnel_html(report: Report) -> str:
         f"<td>{html.escape(', '.join(s.used_by) or '-')}</td></tr>"
         for s in report.funnel)
     return (
-        "<section class='parameter-summary'><h2>Read filtering</h2>"
+        "<section><h2>Read filtering</h2>"
         "<p class='caption'>How many reads survive each step, and which outputs "
         "are built from each.</p>"
         "<table class='parameter-table'><tbody>"
@@ -153,7 +136,7 @@ def _parameters_html(report: Report) -> str:
                    f"<td>{html.escape(value)}</td></tr>"
                    for label, value in _parameter_rows(report))
     return (
-        "<section class='parameter-summary'>"
+        "<section>"
         "<h2>Analysis parameters</h2>"
         "<p class='caption'>Settings and inputs used to generate this report.</p>"
         "<table class='parameter-table'><tbody>" + rows + "</tbody></table></section>")
@@ -173,7 +156,7 @@ def _sequence_block(label: str, sequence: str | None) -> str:
 def _sequences_html(report: Report) -> str:
     """HTML section containing the analysed insert and optional plasmid sequence."""
     return (
-        "<section class='sequence-summary'>"
+        "<section>"
         "<h2>Sequences</h2>"
         "<p class='caption'>Reference sequences used for this analysis.</p>"
         + _sequence_block("Insert sequence", report.target)
@@ -204,6 +187,9 @@ def _fastq_download_name(report: Report) -> str:
     return os.path.basename(name).replace("/", "_").replace("\\", "_") or "report"
 
 
+_DIVIDER = "<div class='divider'></div>"
+
+
 def _figure_png_data_uri(fig: go.Figure) -> str:
     """Render a Plotly figure to an embedded PNG data URI."""
     image = go.Figure(fig).update_layout(title_text="").to_image(format="png", scale=3)
@@ -213,22 +199,20 @@ def _figure_png_data_uri(fig: go.Figure) -> str:
 def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
     """Standalone HTML rendering of the main results section with static plot images."""
     pal = theme.PALETTE
-    warning = ""
-    if report.params.plasmid_seq and report.read_map is None:
-        warning = (
-            "<div class='warning'>Read alignment map skipped - samtools was not "
-            "found on PATH.</div>")
+    warning = "".join(f"<div class='warning'>{html.escape(note)}</div>"
+                      for note in _warnings(report))
 
+    # A divider above each heading, as in the app; a figure without one runs on
+    # inside the section above it.
     sections = []
     for label, fig in figs:
         title = html.escape(str(fig.layout.title.text or label))
         description = html.escape(_figure_description(fig))
         caption = f"<p class='caption'>{description}</p>" if description else ""
-        heading = f"<h2>{title}</h2>" if title else ""
         sections.append(
-            f"<section class='plot-section'>{heading}{caption}"
-            f"<div class='plot'><img src='{_figure_png_data_uri(fig)}' "
-            f"alt='{title}'></div></section>")
+            (f"{_DIVIDER}<h2>{title}</h2>" if title else "") + caption
+            + f"<div class='plot'><img src='{_figure_png_data_uri(fig)}' "
+              f"alt='{title}'></div>")
 
     return f"""<!doctype html>
 <html lang="en">
@@ -254,13 +238,9 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
       font-size: 2.2rem;
       line-height: 1.15;
     }}
-    .subtitle {{
-      color: {pal['muted']};
-      margin: 0 0 18px;
-    }}
     h2 {{
       color: {pal['primary_dark']};
-      margin: 30px 0 6px;
+      margin: 0 0 6px;
       font-size: 1.35rem;
       line-height: 1.25;
     }}
@@ -268,12 +248,6 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
       color: {pal['muted']};
       margin: 0 0 12px;
       line-height: 1.45;
-    }}
-    .summary-cards {{
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin-bottom: 18px;
     }}
     .warning {{
       background: #FFF7E6;
@@ -283,10 +257,12 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
       padding: 10px 12px;
       margin: 12px 0 18px;
     }}
-    .parameter-summary, .sequence-summary {{
-      border-top: 1px solid {pal['grid']};
-      padding-top: 2px;
-      margin-bottom: 22px;
+    .divider {{
+      height: 10px;
+      border-radius: 10px;
+      margin: 38px 0 26px;
+      background: linear-gradient(90deg, rgba(0,0,0,0) 0%, {pal['grid']} 8%,
+                  {pal['secondary']} 50%, {pal['grid']} 92%, rgba(0,0,0,0) 100%);
     }}
     .sequence-section h3 {{
       color: {pal['primary_dark']};
@@ -333,10 +309,6 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }}
-    .plot-section {{
-      border-top: 1px solid {pal['grid']};
-      padding-top: 2px;
-    }}
     .plot {{
       margin-top: 4px;
       flex: 3 1 0;
@@ -352,11 +324,10 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
 <body>
   <main>
     <h1>LibraONT</h1>
-    <div class="summary-cards">{''.join(_summary_cards(report))}</div>
     {warning}
-    {_parameters_html(report)}
-    {_funnel_html(report)}
-    {_sequences_html(report)}
+    {_DIVIDER}{_parameters_html(report)}
+    {_DIVIDER}{_funnel_html(report)}
+    {_DIVIDER}{_sequences_html(report)}
     {''.join(sections)}
   </main>
 </body>
@@ -426,16 +397,8 @@ def _divider() -> None:
 
 def render(report: Report) -> None:
     """Top-level results renderer."""
-    codons, spare = divmod(len(report.target), 3)
-    if spare:      # trailing bases never form a codon, so they are dropped
-        st.warning(
-            f"Insert is {len(report.target):,} bp - not a whole number of codons "
-            f"({codons:,} codons + {spare} spare base{'' if spare == 1 else 's'}). "
-            f"The spare base{' is' if spare == 1 else 's are'} dropped from the "
-            "codon and amino-acid analysis; check the start and stop positions.")
-    if report.params.plasmid_seq and report.read_map is None:
-        st.warning("Read alignment map skipped - samtools was not found on PATH "
-                   "(activate the `libraont` conda environment).")
+    for note in _warnings(report):
+        st.warning(note)
     figs = _build_figures(report)
     for label, fig in figs:
         # The heading is the figure's own title; a figure without one runs on
