@@ -24,6 +24,14 @@ from .sequences import (collapse_whitespace, filter_fastq, revcomp,
 
 TOOLS = ("minimap2", "samtools")
 
+# Agreement codes written into ``ReadMap.match_matrix``: 0 not covered, 1 match,
+# 3 deleted, 4 an insertion begins here, and a substitution carrying the read's
+# own base - 5/6/7/8 for A/C/G/T, 2 for anything else.
+SUBSTITUTION_CODES: dict[str, int] = {"A": 5, "C": 6, "G": 7, "T": 8}
+_SUB_LUT = np.full(256, 2, dtype=np.uint8)
+for _base, _code in SUBSTITUTION_CODES.items():
+    _SUB_LUT[ord(_base)] = _code
+
 # Fraction of the insert a read must cover before its assembly can be judged.
 SPANNING_MIN_COVER = 0.95
 # Rows drawn on the read map; beyond this the pileup outruns the panel's pixels.
@@ -311,13 +319,14 @@ class ReadMap:
     """Per-read alignment of a read set to a reference contig."""
     mapped_reads: int
     contig: str
+    contig_seq: str = ""        # the reference itself, for the base track
     region: dict | None = None  # {'start','end','strand'} or None
     # Alignment span on the contig (1-based inclusive), per primary alignment.
     read_starts: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
     read_ends: np.ndarray = field(default_factory=lambda: np.empty(0, dtype=int))
-    # Per-read, per-base agreement, row-aligned to those: 0 = not covered,
-    # 1 = matches, 2 = substituted, 3 = deleted. Insertions occupy no reference
-    # base, so they live only in the sparse records below.
+    # Per-read, per-base agreement, row-aligned to those; see
+    # ``SUBSTITUTION_CODES``. Insertions occupy no reference base, so they live
+    # only in the sparse records below.
     match_matrix: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.uint8))
     # Indels as sparse (row, contig position, length) triples, so their size
     # survives for the plot to threshold on.
@@ -359,7 +368,7 @@ def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
     lines = [ln for ln in view.stdout.splitlines() if ln]
     step = math.ceil(len(lines) / max_rows) if max_rows and len(lines) > max_rows else 1
 
-    ref = np.frombuffer(contig_seq.upper().encode(), dtype="S1")
+    ref = np.frombuffer(contig_seq.upper().encode(), dtype=np.uint8)
     match_counts = np.zeros(contig_length, dtype=np.int64)
     depth_counts = np.zeros(contig_length, dtype=np.int64)
     covered_counts = np.zeros(contig_length, dtype=np.int64)
@@ -392,8 +401,9 @@ def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
                 lo, hi = r, min(r + n, contig_length)
                 if hi > lo:
                     read_seg = np.frombuffer(seq[q:q + (hi - lo)].upper().encode(),
-                                             dtype="S1")
-                    row[lo:hi] = np.where(read_seg == ref[lo:hi], 1, 2)
+                                             dtype=np.uint8)
+                    row[lo:hi] = np.where(read_seg == ref[lo:hi], 1,
+                                          _SUB_LUT[read_seg])
                     if scores is not None:
                         quality_sums[lo:hi] += scores[q:q + (hi - lo)]
                 r += n
@@ -411,7 +421,7 @@ def _read_intervals(samtools: str, bam: str, contig: str, contig_seq: str,
                 q += n
         match_counts += (row == 1)
         depth_counts += (row > 0)
-        covered_counts += (row == 1) | (row == 2)   # a deletion covers nothing
+        covered_counts += (row > 0) & (row != 3)    # a deletion covers nothing
         if index % step:
             continue
         for store, events in ((ins_records, insertions), (del_records, deletions)):
@@ -495,7 +505,7 @@ def map_reads_to_reference(reference_seq: str, fastq_in: str, inner_seq: str | N
         samtools_bin, bam, contig, contig_seq, contig_length, max_rows=max_map_reads)
 
     shutil.rmtree(workdir, ignore_errors=True)
-    return ReadMap(mapped_reads, contig, region,
+    return ReadMap(mapped_reads, contig, contig_seq, region,
                           read_starts=read_starts, read_ends=read_ends,
                           match_matrix=match_matrix,
                           match_counts=match_counts, depth_counts=depth_counts,

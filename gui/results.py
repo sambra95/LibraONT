@@ -22,7 +22,7 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
     composition. An empty heading runs the figure on under the one above it."""
     p = report.params
     figs: list[tuple[str, object]] = [
-        ("Summary of Dataset and Processing", plots.read_summary_figure(
+        ("Read Dataset and Filtering", plots.read_summary_figure(
             report.length_counts, report.phred_counts, report.funnel,
             p.min_read_len, p.max_read_len, p.min_phred,
             plasmid_len=len(clean_sequence(p.plasmid_seq)) if p.plasmid_seq else None)),
@@ -31,14 +31,13 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
             p.structural_insertion_bp, p.structural_deletion_bp)),
     ]
     if report.read_map is not None:
-        figs.append(("Summary of Read Alignments",
+        figs.append(("Read Alignment to the Plasmid",
                      plots.plasmid_map_figure(report.read_map, p.auto_codon_match_pct)))
         figs.append(("",
                      plots.read_alignment_figure(report.read_map, report.target,
                                                  p.structural_insertion_bp,
-                                                 p.structural_deletion_bp,
-                                                 p.auto_codon_match_pct)))
-    figs.append(("Summary of Library Diversity and Coverage", plots.gap_match_figure(
+                                                 p.structural_deletion_bp)))
+    figs.append(("Library Diversity and Coverage", plots.gap_match_figure(
         report.df_counts, ref_seq=report.target[:len(report.df_counts)],
         shade_codons=report.valid_positions or None, frame_offset=0,
         auto_match_threshold=p.auto_codon_match_pct,
@@ -46,20 +45,25 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
 
     if report.valid_positions:
         aa_fig = plots.aa_pies_figure(
-            report.df_aa_counts, report.valid_positions, min_frac=p.pie_min_frac)
+            report.df_aa_counts, report.valid_positions, ref_seq=report.target,
+            min_frac=p.pie_min_frac)
         if aa_fig is not None:
             figs.append(("", aa_fig))
         if report.hap_df is not None:
             figs.append(("", plots.haplotype_treemap_figure(
                 report.hap_df, aa_counts=report.df_aa_counts,
                 positions=report.valid_positions, min_frac=p.pie_min_frac)))
+            panels = plots.variant_panels_figure(
+                report.hap_df, report.codon_matrix, report.valid_positions,
+                aa_counts=report.df_aa_counts, min_frac=p.pie_min_frac)
+            if panels is not None:
+                figs.append(("", panels))
     return figs
 
 
-def _figure_description(fig: go.Figure) -> str:
-    """The plot's interpretation note, if it carries one."""
-    meta = fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
-    return str(meta.get("description") or "")
+def _figure_meta(fig: go.Figure) -> dict:
+    """The figure's own metadata: its subtitle and interpretation note."""
+    return fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
 
 
 def _insert_note(report: Report) -> str | None:
@@ -103,7 +107,7 @@ def _parameter_rows(report: Report) -> list[tuple[str, str]]:
         ("Reads in FASTQ", f"{sum(report.length_counts.values()):,}"),
         ("Mean Phred", f"{report.mean_phred:.1f}" if report.mean_phred is not None
                        else "-"),
-        ("Insert Region", f"{p.start_pos}-{p.stop_pos} (length {len(report.target):,} bp)"),
+        ("Insert length", f"{len(report.target):,} bp"),
         ("Plasmid reference", f"{len(plasmid):,} bp" if plasmid else "No"),
         ("Read length range", read_len_range),
         ("Minimum read quality",
@@ -213,15 +217,19 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
 
     # A divider above each heading, as in the app; a figure without one runs on
     # inside the section above it.
+    def block(fig: go.Figure) -> str:
+        meta = _figure_meta(fig)
+        subtitle = html.escape(str(meta.get("subtitle") or ""))
+        description = html.escape(str(meta.get("description") or ""))
+        return ((f"<h3>{subtitle}</h3>" if subtitle else "")
+                + (f"<p class='caption'>{description}</p>" if description else "")
+                + f"<div class='plot'><img src='{_figure_png_data_uri(fig)}' "
+                  f"alt='{subtitle}'></div>")
+
     sections = []
     for label, fig in figs:
         title = html.escape(str(fig.layout.title.text or label))
-        description = html.escape(_figure_description(fig))
-        caption = f"<p class='caption'>{description}</p>" if description else ""
-        sections.append(
-            (f"{_DIVIDER}<h2>{title}</h2>" if title else "") + caption
-            + f"<div class='plot'><img src='{_figure_png_data_uri(fig)}' "
-              f"alt='{title}'></div>")
+        sections.append((f"{_DIVIDER}<h2>{title}</h2>" if title else "") + block(fig))
 
     return f"""<!doctype html>
 <html lang="en">
@@ -273,7 +281,7 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
       background: linear-gradient(90deg, rgba(0,0,0,0) 0%, {pal['grid']} 8%,
                   {pal['secondary']} 50%, {pal['grid']} 92%, rgba(0,0,0,0) 100%);
     }}
-    .sequence-section h3 {{
+    h3 {{
       color: {pal['primary_dark']};
       font-size: 1rem;
       margin: 14px 0 6px;
@@ -385,11 +393,32 @@ def _downloads(report: Report, figs: list[tuple[str, object]]) -> None:
                            type="primary", width="stretch")
 
 
-def _section(title: str) -> None:
-    """Section heading; ``st.subheader`` would use the body text colour."""
+def _plot(fig: go.Figure) -> None:
+    """One plot with its own heading and note above it."""
+    meta = _figure_meta(fig)
+    if subtitle := meta.get("subtitle"):
+        _subsection(str(subtitle))
+    if note := meta.get("description"):
+        st.caption(str(note))
+    st.plotly_chart(go.Figure(fig).update_layout(title_text=""),
+                    use_container_width=True,
+                    config={"toImageButtonOptions": {"format": "svg"}})
+
+
+def _subsection(title: str) -> None:
+    """Heading for one plot inside a section."""
     st.markdown(
-        f"<h3 style='color:{theme.PALETTE['primary_dark']};font-size:1.5rem;"
-        f"font-weight:600;margin:0 0 0.4rem;padding:0'>{html.escape(title)}</h3>",
+        f"<h3 style='color:{theme.PALETTE['primary_dark']};font-size:1.1rem;"
+        f"font-weight:600;margin:0.7rem 0 0.15rem;padding:0'>"
+        f"{html.escape(title)}</h3>", unsafe_allow_html=True)
+
+
+def _section(title: str) -> None:
+    """Section heading, at ``st.title`` size - Streamlit styles the h1 for us,
+    and its own title would use the body text colour."""
+    st.markdown(
+        f"<h1 style='color:{theme.PALETTE['primary_dark']};margin:0 0 0.5rem;"
+        f"padding:0'>{html.escape(title)}</h1>",
         unsafe_allow_html=True)
 
 
@@ -417,11 +446,7 @@ def render(report: Report) -> None:
         if heading := fig.layout.title.text or label:
             _divider()
             _section(heading)
-        if note := _figure_description(fig):
-            st.caption(note)
-        st.plotly_chart(go.Figure(fig).update_layout(title_text=""),
-                        use_container_width=True,
-                        config={"toImageButtonOptions": {"format": "svg"}})
+        _plot(fig)
 
     _divider()
     _tables(report)

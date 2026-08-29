@@ -169,6 +169,19 @@ def read_codon_calls(msa: dict[str, str], ref_codons: list[tuple[int, int, int]]
             for name, row in msa.items() if name != ref_name}
 
 
+def call_matrix(calls: dict[str, tuple[str | None, ...]]) -> np.ndarray:
+    """Reads called at every position, amino acids as integer codes - the
+    pattern the sampling and covariation plots need, without the letters."""
+    rows = [c for c in calls.values() if c and all(aa is not None for aa in c)]
+    if not rows:
+        return np.empty((0, 0), dtype=np.int16)
+    arr = np.array(rows)
+    codes = np.empty(arr.shape, dtype=np.int16)
+    for j in range(arr.shape[1]):
+        codes[:, j] = np.unique(arr[:, j], return_inverse=True)[1]
+    return codes
+
+
 def haplotype_counts(calls: dict[str, tuple[str | None, ...]],
                      ref_calls: tuple[str | None, ...] | None, positions, *,
                      unknown: str = "?", max_unknown: int = 0) -> pd.DataFrame:

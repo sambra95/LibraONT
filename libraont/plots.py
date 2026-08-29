@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from . import theme
-from .alignment import ReadMap
+from .alignment import SUBSTITUTION_CODES, ReadMap
 from .analysis import reference_match_percent
 from .constants import GENETIC_CODE
 
@@ -113,7 +113,7 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
     two cutoffs keep. Bars a cutoff excludes are red, as is the slice they
     account for. The funnel below carries on from here."""
     if not length_counts and not phred_counts:
-        return _empty("No reads found", "Summary of Dataset and Processing")
+        return _empty("No reads found", "Read Dataset and Filtering")
     muted = theme.PALETTE["muted"]
     # The funnel already counts what the filters keep, stage by stage.
     counts = {s.label: s.count for s in funnel if s.count is not None}
@@ -157,7 +157,7 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
         "on, each red branch is what that step removes, and the right-hand column "
         "is every way a read can end up.")
     fig.update_layout(
-        template=_T, title="Summary of Dataset and Processing", height=560, bargap=0.05,
+        template=_T, title="Read Dataset and Filtering", height=560, bargap=0.05,
         showlegend=False, margin=dict(l=56, r=24, t=56, b=44),
         annotations=annotations,
         # The two histograms stack in the left column; the ring sits beside them.
@@ -218,11 +218,20 @@ _MATCH_GREY = "#B4BAC1"
 _SUBSTITUTION_AMBER = "#E0B252"
 _DELETION_RED = _RED
 _INSERTION_BLUE = "#3A6FB0"
-# Four flat bands over zmin=0.5..zmax=4.5, so codes 1-4 land mid-band.
-_AGREEMENT_SCALE = [[0.00, _MATCH_GREY], [0.25, _MATCH_GREY],
-                    [0.25, _SUBSTITUTION_AMBER], [0.50, _SUBSTITUTION_AMBER],
-                    [0.50, _DELETION_RED], [0.75, _DELETION_RED],
-                    [0.75, _INSERTION_BLUE], [1.00, _INSERTION_BLUE]]
+# Flat bands over zmin=0.5..zmax=8.5, so every agreement code lands mid-band;
+# the substituted-base codes 5-8 all read amber.
+_AGREEMENT_SCALE = [[0.000, _MATCH_GREY], [0.125, _MATCH_GREY],
+                    [0.125, _SUBSTITUTION_AMBER], [0.250, _SUBSTITUTION_AMBER],
+                    [0.250, _DELETION_RED], [0.375, _DELETION_RED],
+                    [0.375, _INSERTION_BLUE], [0.500, _INSERTION_BLUE],
+                    [0.500, _SUBSTITUTION_AMBER], [1.000, _SUBSTITUTION_AMBER]]
+# Agreement code -> the read's base, and byte -> letter for the reference.
+_SUB_LETTER = np.array(["?"] * 9)
+for _base, _code in SUBSTITUTION_CODES.items():
+    _SUB_LETTER[_code] = _base
+_BASE_LETTER = np.full(256, "?", dtype="<U1")
+for _base in "ACGTN":
+    _BASE_LETTER[ord(_base)] = _base
 # A base is one pixel over a whole plasmid, so every departure also gets a
 # square marker; otherwise the map reads as uniform grey.
 _EVENT_MARKER = dict(size=3, symbol="square", line=dict(width=0))
@@ -238,8 +247,7 @@ def match_percent(cov: ReadMap) -> np.ndarray:
 
 
 def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
-                          insertion_bp: int = 0, deletion_bp: int = 0,
-                          auto_match_threshold: float | None = None) -> go.Figure:
+                          insertion_bp: int = 0, deletion_bp: int = 0) -> go.Figure:
     """One row per read, coloured base by base against the reference: grey
     match, amber substitution, red deletion, blue on the base an insertion
     begins before, blank where the read does not reach. Each departure also gets
@@ -284,17 +292,19 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
     depth = cov.depth_counts.astype(float)
     pct = match_percent(cov)
 
-    # The insert's amino acids, then its bases, laid over the plasmid coordinate.
-    tracks = []
+    # The insert's amino acids over its own span, then the whole reference's
+    # bases, both on the plasmid coordinate.
+    tracks: list[tuple[str, go.Bar]] = []
     if insert_seq and cov.region:
         reverse = cov.region.get("strand") == "-"
-        placing = dict(origin=cov.region["end"] if reverse else cov.region["start"],
+        aa = _aa_track(insert_seq, len(insert_seq), 0, yaxis=None, number_labels=True,
+                       origin=cov.region["end"] if reverse else cov.region["start"],
                        step=-1 if reverse else 1)
-        tracks = [t for t in (
-            _aa_track(insert_seq, len(insert_seq), 0, yaxis=None,
-                      number_labels=True, **placing),
-            _base_track(insert_seq, len(insert_seq), yaxis=None, **placing),
-        ) if t is not None]
+        if aa is not None:
+            tracks.append(("AA", aa))
+    bases = _base_track(cov.contig_seq, len(cov.contig_seq), yaxis=None)
+    if bases is not None:
+        tracks.append(("bp", bases))
 
     rows = len(tracks) + 2
     heights = {2: [0.06, 0.05, 0.30, 0.59], 1: [0.07, 0.30, 0.63]}.get(
@@ -302,7 +312,7 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=heights,
                         vertical_spacing=0.025)
     trace_row, map_row = len(tracks) + 1, len(tracks) + 2
-    for i, track in enumerate(tracks, start=1):
+    for i, (_, track) in enumerate(tracks, start=1):
         fig.add_trace(track, row=i, col=1)
     fig.add_trace(go.Scatter(
         x=positions, y=pct, mode="lines", name="Match",
@@ -311,15 +321,8 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
         customdata=depth,
         hovertemplate="Position %{x}<br>%{y:.1f}% of %{customdata:.0f} reads match"
                       "<extra></extra>"), row=trace_row, col=1)
-    if auto_match_threshold is not None:
-        fig.add_hline(y=auto_match_threshold, row=trace_row, col=1,
-                      line=dict(color=theme.PALETTE["muted"], width=1.5,
-                                dash="3px,3px"),
-                      annotation_position="top left",
-                      annotation_font=dict(size=10,
-                                           color=theme.PALETTE["muted"]))
     fig.add_trace(go.Heatmap(
-        z=z, x=positions, showscale=False, zmin=0.5, zmax=4.5,
+        z=z, x=positions, showscale=False, zmin=0.5, zmax=8.5,
         colorscale=_AGREEMENT_SCALE,
         hovertemplate="Position %{x}<br>read row %{y}<extra></extra>"),
         row=map_row, col=1)
@@ -327,12 +330,19 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
     # A marker per coloured cell, so no departure is lost to being one pixel
     # wide. Taken from the rendered z, not the raw matrix: an insertion repaints
     # the cell it begins before, which must not also claim a substitution.
-    sub_rows, sub_cols = np.nonzero(z == 2)
+    sub_rows, sub_cols = np.nonzero((z == 2) | (z >= 5))
     if sub_rows.size:
+        # Each marker names the change: reference base -> the read's own base.
+        alt = _SUB_LETTER[z[sub_rows, sub_cols].astype(int)]
+        ref_bases = np.frombuffer(cov.contig_seq.upper().encode(), dtype=np.uint8)
+        change = (np.char.add(np.char.add(_BASE_LETTER[ref_bases[sub_cols]], "→"), alt)
+                  if ref_bases.size >= matrix.shape[1] else alt)
         fig.add_trace(go.Scatter(
             x=sub_cols + 1, y=sub_rows, mode="markers", showlegend=False,
             marker=dict(color=_SUBSTITUTION_AMBER, **_EVENT_MARKER),
-            hovertemplate="Substitution at position %{x}<extra></extra>"),
+            customdata=change,
+            hovertemplate="Substitution %{customdata} at position %{x}"
+                          "<extra></extra>"),
             row=map_row, col=1)
 
     del_rows, del_cols = np.nonzero(z == 3)
@@ -368,8 +378,17 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
     fig.update_layout(
         template=_T, title="", height=height, showlegend=False,
         bargap=0, uniformtext=dict(minsize=5, mode="hide"),
-        margin=dict(l=60, r=48, t=_T_MARGIN + 12, b=_B_MARGIN))
-    for i, title in enumerate(["AA", "bp"][:len(tracks)], start=1):
+        margin=dict(l=60, r=48, t=_T_MARGIN + 12, b=_B_MARGIN),
+        meta={"subtitle": "Every read, base by base",
+              "description":
+              "One row per read - an even sample of them where the pileup is deep "
+              "- coloured against the reference: grey matches, amber a "
+              "substitution, red a deletion, blue the base an insertion begins "
+              "before, and blank where the read does not reach. Rows sort by start "
+              "position, so a change many reads share lines up as a vertical "
+              "stripe. Above the map run the match trace and the reference's "
+              "amino acids and bases."})
+    for i, (title, _) in enumerate(tracks, start=1):
         fig.update_yaxes(range=[0, 1], showgrid=False, zeroline=False,
                          showticklabels=False, title_text=title, row=i, col=1)
         fig.update_xaxes(range=[0, x_max], row=i, col=1)
@@ -495,7 +514,7 @@ def plasmid_map_figure(cov: ReadMap, auto_match_threshold: float | None = None
     depth, covered = cov.depth_counts, cov.covered_counts
     n = int(cov.contig_length or depth.size)
     if n == 0 or depth.size == 0:
-        return _empty("No reads aligned to the plasmid", "Summary of Read Alignments")
+        return _empty("No reads aligned to the plasmid", "Read Alignment to the Plasmid")
     reads = int(cov.mapped_reads)
     # Without per-base quality (a BAM with no quality strings) the panel simply
     # has nothing to draw.
@@ -527,7 +546,7 @@ def plasmid_map_figure(cov: ReadMap, auto_match_threshold: float | None = None
                       "%{customdata[1]:.1f}% of %{customdata[3]:,.0f} reads match")
 
     fig.update_layout(
-        template=_T, title="Summary of Read Alignments", height=400, showlegend=False,
+        template=_T, title="Read Alignment to the Plasmid", height=400, showlegend=False,
         margin=dict(l=52, r=52, t=60, b=36),   # room for the bp labels either side
         polar=_polar_axes(n, [0.0, 0.28]),
         polar2=_polar_axes(n, [0.36, 0.64], ("Q0", f"Q{q_top / 2:g}", f"Q{q_top:g}")),
@@ -536,14 +555,13 @@ def plasmid_map_figure(cov: ReadMap, auto_match_threshold: float | None = None
             dict(x=0.5, y=-0.04, xref="paper", yref="paper", showarrow=False,
                  text=f"{n:,} bp plasmid",
                  font=dict(size=11, color=theme.PALETTE["muted"]))],
-        meta={"description":
-              f"Above, the plasmid as a circle three times, over {reads:,} mapped "
-              "reads: how many of them reach each base, their mean basecall Phred "
-              "there, and how many of the covering reads match the reference - with "
-              "the grey ring the backbone and the red arc the insert. Below, the "
-              "same alignment read by read, coloured base by base: grey matches the "
-              "reference, amber a substitution, red a deletion, blue where an "
-              "insertion begins, and blank where the read does not reach."})
+        meta={"subtitle": "Coverage, quality and match around the plasmid",
+              "description":
+              f"The plasmid as the circle it is, three times over {reads:,} mapped "
+              "reads: how many of them reach each base, how well basecalled they "
+              "are there, and how many of the covering reads match the reference. "
+              "On all three the grey ring is the backbone, the red arc the insert, "
+              "and position runs clockwise from the top."})
     return fig
 
 
@@ -672,8 +690,11 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
 
     fig.update_layout(
         template=_T, hovermode="x unified",
-        title="Summary of Library Diversity and Coverage",
-        xaxis_title="Position in reference (1-based, nucleotides)",
+        title="Library Diversity and Coverage",
+        # Pinned to the bases themselves, so the trace and the bands below it
+        # run to both edges instead of floating inside a padded axis.
+        xaxis=dict(title_text="Position in reference (1-based, nucleotides)",
+                   range=[0.5, L + 0.5]),
         # Pinned to the full range: a match track that autoscaled would make a
         # 99%-vs-97% wobble look like a cliff.
         yaxis=dict(title="Percentage (%)", range=[0, 100],
@@ -691,21 +712,23 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
         margin=dict(t=90),
         hoverlabel=dict(font=dict(family="monospace", size=12)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        meta={"description":
-              "Above, how often each insert base matches the reference, gaps "
-              "excluded from the denominator - low positions mark diversified or "
-              "mutated sites - under bands giving each codon's reference amino "
-              "acid, coloured by biochemical group, and its reference base. Then "
-              "the amino acids actually seen at each detected codon, and last "
-              "every unique variant across those codons, sized by the reads "
-              "carrying it with the reference combination outlined in black."},
+        meta={"subtitle": "Reference match along the insert",
+              "description":
+              "How often each insert base matches the reference, gaps excluded "
+              "from the denominator: a position the library diversifies drops "
+              "away from 100%, and anything under the dashed cutoff is taken as "
+              "a variable codon. The bands above give each codon's reference "
+              "amino acid, coloured by biochemical group, and its reference "
+              "base."},
     )
     return fig
 
 
 def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *,
+                   ref_seq: str | None = None,
                    min_frac: float = 0.01) -> go.Figure | None:
-    """Donut per codon position; slices below ``min_frac`` fold into 'Other'."""
+    """Donut per codon position; slices below ``min_frac`` fold into 'Other'.
+    The middle carries the reference residue and the reads behind the donut."""
     pos_ok = [p for p in positions if p in df_aa_counts.index]
     if not pos_ok:
         return None
@@ -717,6 +740,8 @@ def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *,
     # Keep the actual row gap near-constant so large auto-detected sets do not
     # violate Plotly's max spacing limit or waste vertical space.
     vertical_spacing = 0.0 if rows == 1 else min(0.08, 28 / height)
+    up = (ref_seq or "").upper()
+    wild_type = {p: GENETIC_CODE.get(up[(p - 1) * 3:(p - 1) * 3 + 3]) for p in pos_ok}
     fig = make_subplots(
         rows=rows, cols=cols,
         specs=[[{"type": "domain"} for _ in range(cols)] for _ in range(rows)],
@@ -725,6 +750,7 @@ def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *,
     )
 
     k = 0
+    middles: list[str] = []
     for r in range(1, rows + 1):
         for c in range(1, cols + 1):
             if k >= n:
@@ -746,6 +772,10 @@ def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *,
                     values.append(float((small * total).sum()))
             else:
                 labels, values = ["(no data)"], [1]
+            aa = wild_type.get(pos)
+            middles.append(
+                (f"<span style='color:{theme.AA_COLORS.get(aa, theme.PALETTE['muted'])}'>"
+                 f"<b>WT {aa}</b></span><br>" if aa else "") + f"n={int(total):,}")
             fig.add_trace(go.Pie(
                 labels=labels, values=values, hole=0.5, sort=False,
                 customdata=[_AA_NAMES.get(label, label) for label in labels],
@@ -758,20 +788,27 @@ def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *,
                 showlegend=False,
             ), row=r, col=c)
 
-    # Centred n=… annotation inside each real donut.
-    for trace in fig.data:
-        if isinstance(trace, go.Pie) and trace.opacity != 0 and trace.labels != ("",):
-            xd, yd = trace.domain["x"], trace.domain["y"]
-            fig.add_annotation(x=(xd[0] + xd[1]) / 2, y=(yd[0] + yd[1]) / 2,
-                               xref="paper", yref="paper", showarrow=False,
-                               xanchor="center", yanchor="middle", align="center",
-                               text=f"n={int(sum(trace.values))}",
-                               font=dict(size=13, color=theme.PALETTE["muted"]))
+    # Reference residue and read count in the middle of each real donut.
+    drawn = (t for t in fig.data
+             if isinstance(t, go.Pie) and t.opacity != 0 and t.labels != ("",))
+    for trace, middle in zip(drawn, middles):
+        xd, yd = trace.domain["x"], trace.domain["y"]
+        fig.add_annotation(x=(xd[0] + xd[1]) / 2, y=(yd[0] + yd[1]) / 2,
+                           xref="paper", yref="paper", showarrow=False,
+                           xanchor="center", yanchor="middle", align="center",
+                           text=middle, font=dict(size=12,
+                                                  color=theme.PALETTE["muted"]))
 
     fig.update_layout(
         template=_T, title="", showlegend=False,
         height=height, width=cols * 300,
         uniformtext_minsize=10, uniformtext_mode="hide",
+        meta={"subtitle": "Amino acids at each variable codon",
+              "description":
+              "One donut per codon the analysis calls variable: each slice is an "
+              "amino acid's share of the reads there, with residues below the "
+              "grouping threshold folded into 'Other'. The middle names the "
+              "reference residue and the reads behind that codon."},
     )
     return fig
 
@@ -791,6 +828,19 @@ def _rare_aa_by_position(aa_counts: pd.DataFrame | None, positions, min_frac: fl
     return rare
 
 
+def _drop_rare_variants(hap_df: pd.DataFrame, aa_counts: pd.DataFrame | None,
+                        positions, min_frac: float) -> pd.DataFrame:
+    """Variants carrying an amino acid below ``min_frac`` at its codon leave the
+    library view entirely, so every variant plot describes the same subset."""
+    rare = _rare_aa_by_position(aa_counts, positions, min_frac)
+    if not rare:
+        return hap_df
+    def has_rare(combo) -> bool:
+        return isinstance(combo, tuple) and any(
+            aa in rare.get(pos, ()) for pos, aa in zip(positions, combo))
+    return hap_df[~hap_df["combo_tuple"].map(has_rare)]
+
+
 def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
                              top_n: int | None = None, aa_counts: pd.DataFrame | None = None,
                              positions=None, min_frac: float = 0.0) -> go.Figure:
@@ -801,12 +851,7 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
     if hap_df.empty:
         return _empty("No haplotypes to display")
 
-    rare_by_pos = _rare_aa_by_position(aa_counts, positions, min_frac)
-    if rare_by_pos:
-        def _has_rare(combo_tuple) -> bool:
-            return isinstance(combo_tuple, tuple) and any(
-                aa in rare_by_pos.get(pos, ()) for pos, aa in zip(positions, combo_tuple))
-        hap_df = hap_df[~hap_df["combo_tuple"].map(_has_rare)]
+    hap_df = _drop_rare_variants(hap_df, aa_counts, positions, min_frac)
     if hap_df.empty:
         return _empty("No variants remain above the grouping threshold")
 
@@ -846,7 +891,14 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
                        "<br>Reads %{value}"
                        "<br>%{percentRoot:.1%}<extra></extra>"),
     ))
-    fig.update_layout(template=_T, height=500, title="")
+    fig.update_layout(
+        template=_T, height=500, title="",
+        meta={"subtitle": "Unique variants by abundance",
+              "description":
+              "Every unique combination of amino acids across the variable "
+              "codons, each tile sized by the reads carrying it, so a library "
+              "dominated by a few clones shows a few large tiles. The reference "
+              "combination is outlined in black."})
     return fig
 
 
@@ -854,6 +906,143 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
 _GROUP_ORDER = ("Hydrophobic", "Acidic", "Hydrophilic", "Basic", "Special")
 _AA_BY_GROUP = [aa for group in _GROUP_ORDER
                 for aa in theme.AA_ORDER if theme.AA_GROUPS.get(aa) == group]
+
+
+def _normalised_mi(a: np.ndarray, b: np.ndarray) -> float:
+    """Mutual information of two codon columns over the smaller entropy, so 0 is
+    independence and 1 is one codon fully determining the other."""
+    kb = int(b.max()) + 1
+    joint = np.bincount(a * kb + b,
+                        minlength=(int(a.max()) + 1) * kb).reshape(-1, kb).astype(float)
+    joint /= joint.sum()
+    px, py = joint.sum(axis=1), joint.sum(axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mi = np.nansum(joint * np.log2(joint / np.outer(px, py)))
+        entropy = min(-np.nansum(px * np.log2(px)), -np.nansum(py * np.log2(py)))
+    return float(mi / entropy) if entropy > 0 else 0.0
+
+
+def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
+                          positions, *, aa_counts: pd.DataFrame | None = None,
+                          min_frac: float = 0.0, replicates: int = 8,
+                          points: int = 120) -> go.Figure | None:
+    """The library's variants three ways, in one row: how far each sits from the
+    reference, whether the sequencing has seen them all, and whether the
+    diversified codons vary independently. A panel is left out when its data
+    cannot say anything."""
+    df = _drop_rare_variants(hap_df, aa_counts, positions, min_frac)
+    distances = pd.to_numeric(df["aa_hamming_distance"], errors="coerce") \
+        if not df.empty else None
+    graded = distances is not None and distances.notna().any()
+    sampled = codon_matrix is not None and codon_matrix.shape[0] >= 2
+    paired = sampled and codon_matrix.shape[1] >= 2
+    titles = [t for t, ok in (("Frequency of Hamming Distance to WT", graded),
+                              ("Unique variants seen", sampled),
+                              ("Codon covariation", paired)) if ok]
+    if not titles:
+        return None
+    at = {title: i + 1 for i, title in enumerate(titles)}
+    fig = make_subplots(rows=1, cols=len(titles), subplot_titles=titles,
+                        horizontal_spacing=0.07)
+
+    if graded:
+        col = at["Frequency of Hamming Distance to WT"]
+        counts = df["count"].to_numpy(dtype=float)
+        per_step = (pd.DataFrame({"changes": distances, "count": counts}).dropna()
+                    .groupby("changes").agg(variants=("count", "size"),
+                                            reads=("count", "sum")))
+        fig.add_trace(go.Bar(
+            x=per_step.index.astype(int), y=per_step["variants"], showlegend=False,
+            # The section's own teal, with wild type in the funnel's amber.
+            marker_color=[FATE_COLORS["Wild type"] if d == 0
+                          else theme.PALETTE["primary"] for d in per_step.index],
+            customdata=100.0 * per_step["reads"].to_numpy() / counts.sum(),
+            hovertemplate="%{x} change(s) from the reference<br>%{y:,} variants, "
+                          "%{customdata:.1f}% of reads<extra></extra>"), row=1, col=col)
+        fig.update_xaxes(title_text="Amino-acid changes", dtick=1, row=1, col=col)
+        fig.update_yaxes(title_text="Frequency", row=1, col=col)
+
+    if sampled:
+        col = at["Unique variants seen"]
+        n = codon_matrix.shape[0]
+        ids = np.unique(codon_matrix, axis=0, return_inverse=True)[1]
+        xs = np.unique(np.linspace(1, n, points).astype(int))
+        # A variant is new at the first read carrying it, so the curve is a
+        # lookup into the sorted first-occurrence positions of one shuffle.
+        rng = np.random.default_rng(0)
+        curves = np.array([
+            np.searchsorted(
+                np.sort(np.unique(ids[rng.permutation(n)], return_index=True)[1]),
+                xs, side="left")
+            for _ in range(replicates)], dtype=float)
+        mean = curves.mean(axis=0)
+        # Upper edge first, then the lower one filling back to it.
+        for edge, fill in ((curves.max(axis=0), None), (curves.min(axis=0), "tonexty")):
+            fig.add_trace(go.Scatter(
+                x=xs, y=edge, mode="lines", line=dict(width=0), hoverinfo="skip",
+                showlegend=False, fill=fill,
+                fillcolor=_rgba(theme.PALETTE["primary"], 0.14)), row=1, col=col)
+        fig.add_trace(go.Scatter(
+            x=[0, n], y=[0, n], mode="lines", showlegend=False,
+            line=dict(color=theme.PALETTE["muted"], width=1, dash="3px,3px"),
+            hovertemplate="Every read a new variant<extra></extra>"), row=1, col=col)
+        fig.add_trace(go.Scatter(
+            x=xs, y=mean, mode="lines", showlegend=False,
+            line=dict(color=theme.PALETTE["primary"], width=1.8),
+            customdata=100.0 * mean / max(mean[-1], 1.0),
+            hovertemplate="%{x:,} reads<br>%{y:,.0f} variants "
+                          "(%{customdata:.1f}% of all seen)<extra></extra>"),
+            row=1, col=col)
+        # One read to one variant on both axes, so the diagonal is 45 degrees
+        # and the panel is square.
+        fig.update_xaxes(title_text="Reads sampled", range=[0, n],
+                         constrain="domain", row=1, col=col)
+        fig.update_yaxes(title_text="Unique variants", range=[0, n],
+                         scaleanchor=f"x{col if col > 1 else ''}", scaleratio=1,
+                         constrain="domain", row=1, col=col)
+
+    if paired:
+        col = at["Codon covariation"]
+        k = codon_matrix.shape[1]
+        labels = [str(p) for p in positions[:k]]
+        z = np.full((k, k), np.nan)
+        for i in range(k):
+            for j in range(i + 1, k):
+                z[i, j] = z[j, i] = _normalised_mi(codon_matrix[:, i],
+                                                   codon_matrix[:, j])
+        fig.add_trace(go.Heatmap(
+            z=z, x=labels, y=labels, xgap=1, ygap=1, zmin=0, zmax=1,
+            colorscale=[[0.0, theme.PALETTE["surface"]], [0.35, "#CFE0E7"],
+                        [1.0, theme.PALETTE["primary_dark"]]],
+            colorbar=dict(title=dict(text="Shared information", side="right"),
+                          x=1.0, xanchor="left", thickness=9, len=0.85,
+                          outlinewidth=0, tickfont=dict(size=10), tickmode="array",
+                          tickvals=[0, 0.25, 0.5, 0.75, 1.0],
+                          ticktext=["0 uncorrelated", "0.25", "0.5", "0.75",
+                                    "1 correlated"]),
+            hovertemplate="Codons %{y} and %{x}<br>%{z:.2f} of the smaller codon's "
+                          "variation explained<extra></extra>"), row=1, col=col)
+        # constrain="domain": square cells shrink the box rather than pad the
+        # range, so the axes sit against the matrix.
+        fig.update_xaxes(title_text="Diversified codon", type="category",
+                         showgrid=False, ticks="", title_standoff=6,
+                         constrain="domain", row=1, col=col)
+        fig.update_yaxes(title_text="Diversified codon", type="category",
+                         showgrid=False, ticks="", title_standoff=4,
+                         ticklabelstandoff=-6, constrain="domain",
+                         autorange="reversed", scaleanchor=f"x{col}", row=1, col=col)
+
+    fig.update_layout(
+        template=_T, title="", height=400, bargap=0.25,
+        margin=dict(l=58, r=112, t=62, b=48),
+        meta={"subtitle": "Variant spread, sampling and codon independence",
+              "description":
+              "Unique variants by how many amino-acid changes they carry from the "
+              "reference, wild type in amber; the variants found as reads are "
+              "sampled, over eight shuffles, against the diagonal where every "
+              "read is new; and the shared information between each pair of "
+              "diversified codons, on a scale fixed from 0 to 1."})
+    return fig
 
 
 def _aa_freq_block(counts_row: pd.Series, ref_aa: str | None = None) -> str:

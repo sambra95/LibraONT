@@ -91,22 +91,6 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         st.subheader("Initial data analysis")
         st.caption("Applied when reads are filtered and aligned; changing any of "
                    "these re-runs the analysis.")
-        full = st.checkbox("Use full gene length", value=True,
-                           help="Uncheck to analyse a sub-region (e.g. one domain).")
-        # Shown either way, but frozen on the whole gene while that box is
-        # ticked - the value has to be written before the widget is built.
-        end = max(gene_len, 1)
-        for key, default in (("roi_start", 1), ("roi_stop", end)):
-            st.session_state[key] = (default if full else
-                                     min(max(st.session_state.get(key, default), 1), end))
-        c1, c2 = st.columns(2)
-        start_pos = c1.number_input("Start (1-based)", min_value=1, max_value=end,
-                                    key="roi_start", disabled=full,
-                                    help="First base of the region (1-based).")
-        stop_pos = c2.number_input("Stop (inclusive)", min_value=1, max_value=end,
-                                   key="roi_stop", disabled=full,
-                                   help="Last base of the region (inclusive).")
-
         # Length window, defaulted to the range present in the FASTQ. Shown even
         # before there is one, so the control does not appear and disappear.
         cached_upload = st.session_state.get("_fastq_upload")
@@ -204,9 +188,7 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         return None, run, "Codon positions must be integers (comma-separated)."
 
     params = AnalysisParams(
-        fastq_path=fastq_path, gene_seq=gene_seq,
-        start_pos=int(start_pos), stop_pos=int(stop_pos),
-        fastq_name=fastq_name,
+        fastq_path=fastq_path, gene_seq=gene_seq, fastq_name=fastq_name,
         min_read_len=int(min_read_len) if min_read_len is not None else None,
         max_read_len=int(max_read_len) if max_read_len is not None else None,
         min_phred=min_phred,

@@ -25,11 +25,6 @@ def collapse_whitespace(seq: str) -> str:
     return re.sub(r"\s+", "", str(seq))
 
 
-def extract_target(gene_seq: str, start_pos: int, stop_pos: int) -> str:
-    """Clean ``gene_seq``, then slice 1-based inclusive ``[start_pos, stop_pos]``."""
-    return clean_sequence(gene_seq)[start_pos - 1:stop_pos]
-
-
 def _open_text(path: str):
     """Open a plain or gzipped text file for reading."""
     opener = gzip.open if path.endswith(".gz") else open

@@ -12,13 +12,14 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+import numpy as np
 import pandas as pd
 
 from . import alignment, analysis
 from .alignment import Projection, ReadMap, ReadStructure
 from .constants import (BASE_CATEGORIES, DEFAULT_PIE_MIN_FRAC,
                         DEFAULT_STRUCTURAL_DELETION_BP, DEFAULT_STRUCTURAL_INSERTION_BP)
-from .sequences import extract_target, fastq_stats
+from .sequences import clean_sequence, fastq_stats
 
 Progress = Optional[Callable[[float, str], None]]
 
@@ -31,8 +32,6 @@ class AnalysisParams:
     """Everything needed to run one analysis."""
     fastq_path: str
     gene_seq: str
-    start_pos: int
-    stop_pos: int
     fastq_name: Optional[str] = None
     # Raw-read length window: reads outside ``[min_read_len, max_read_len]`` are
     # dropped before alignment. ``None`` on either side disables that bound.
@@ -115,6 +114,8 @@ class Report:
     phred_counts: Counter = field(default_factory=Counter)
     hap_df: Optional[pd.DataFrame] = None
     read_map: Optional[ReadMap] = None
+    # Fully-called reads x diversified codons, amino acids as integer codes.
+    codon_matrix: Optional[np.ndarray] = None
     # Most diversified codons any single read fails to cover - the ceiling worth
     # offering on the treemap's tolerance.
     max_unknown_codons: int = 0
@@ -176,7 +177,7 @@ def compute_alignment(params: AnalysisParams, tools: Optional[dict] = None,
                            "and plot is built from.")
 
     step(0.05, "Parsing reference and reading FASTQ…")
-    target = extract_target(params.gene_seq, params.start_pos, params.stop_pos)
+    target = clean_sequence(params.gene_seq)
     length_counts, mean_phred, phred_counts = fastq_stats(params.fastq_path)
 
     step(0.25, "Aligning reads (minimap2)…")
@@ -226,7 +227,7 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
     quality = f"Q{params.min_phred}+" if params.min_phred is not None else "no quality filter"
     stages = [
         FunnelStage("Reads in FASTQ", proj.n_input, "all reads submitted",
-                    ("Summary of Dataset and Processing",)),
+                    ("Read Dataset and Filtering",)),
         FunnelStage("Within read-length window", proj.n_length_kept, window, (),
                     "outside the length window",
                     passed=f"are within the read-length window ({window})",
@@ -239,7 +240,7 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
         FunnelStage("Aligned to the reference", proj.n_aligned,
                     f"{proj.n_unaligned:,} discarded for not aligning at all "
                     "(contaminant DNA, not library)",
-                    ("Summary of Read Alignments",), "no alignment",
+                    ("Read Alignment to the Plasmid",), "no alignment",
                     passed="align somewhere on the reference",
                     failed="do not align to the reference at all"),
         FunnelStage("Informative about the insert", proj.n_informative,
@@ -263,7 +264,7 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
             f"spanning the whole insert, {len(spanning_intact):,} "
             f"({spanning_rate}) are correctly assembled - only a spanning read "
             "can be judged",
-            ("Summary of Library Diversity and Coverage",),
+            ("Library Diversity and Coverage",),
             "structural indel",
             passed=f"carry no insertion ≥ {params.structural_insertion_bp} bp and "
                    f"no deletion ≥ {params.structural_deletion_bp} bp",
@@ -275,7 +276,7 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
         stages.append(FunnelStage(
             "Called at every variable codon", n_haplotype_reads,
             "intact reads with an unambiguous codon at all selected positions",
-            ("Summary of Library Diversity and Coverage",),
+            ("Library Diversity and Coverage",),
             "a diversified codon unreadable",
             passed="give an unambiguous amino acid at every diversified codon",
             failed="have at least one diversified codon that cannot be called"))
@@ -378,4 +379,5 @@ def tabulate_report(params: AnalysisParams, result: AlignmentResult,
         df_aa_freq=df_aa_freq, valid_positions=valid_positions,
         projection=proj, funnel=_build_funnel(params, result, intact, n_hap),
         fates=_build_fates(params, result, calls, ref_calls),
-        hap_df=hap_df, read_map=read_map, max_unknown_codons=worst)
+        hap_df=hap_df, read_map=read_map, max_unknown_codons=worst,
+        codon_matrix=analysis.call_matrix(calls) if calls else None)
