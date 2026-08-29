@@ -846,8 +846,7 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
                              positions=None, min_frac: float = 0.0) -> go.Figure:
     """Treemap of haplotypes sized by count; ``top_n`` folds the rest into
     'Other'. Variants carrying an amino acid below ``min_frac`` at its codon are
-    excluded (0 keeps everything). A read missing more diversified codons than
-    tolerated has no combination, so it is absent from the tiles entirely."""
+    excluded (0 keeps everything), as are reads not called at every codon."""
     if hap_df.empty:
         return _empty("No haplotypes to display")
 
@@ -856,12 +855,13 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
         return _empty("No variants remain above the grouping threshold")
 
     df = hap_df[["combo_label", "count"]].copy()
+    df["mutations"] = hap_df.get("mutations", "")
     df["is_reference"] = hap_df.get("is_reference", False)
     df["aa_hamming_distance"] = hap_df.get("aa_hamming_distance", pd.NA)
     df = df.sort_values("count", ascending=False).reset_index(drop=True)
 
     if top_n is not None and len(df) > top_n:
-        other = pd.DataFrame([{"combo_label": "Other",
+        other = pd.DataFrame([{"combo_label": "Other", "mutations": "several",
                                "count": int(df.iloc[top_n:]["count"].sum()),
                                "is_reference": False,
                                "aa_hamming_distance": pd.NA}])
@@ -884,11 +884,12 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
     fig = go.Figure(go.Treemap(
         labels=df_plot["combo_label"], parents=[""] * len(df_plot),
         values=df_plot["count"], branchvalues="total",
-        customdata=list(zip(status, distances)),
+        customdata=list(zip(status, distances,
+                            df_plot["mutations"].fillna("").astype(str))),
         marker=dict(colors=colors, line=dict(color=line_colors, width=line_widths)),
         textinfo="label+percent entry",
-        hovertemplate=("%{label}<br>Hamming distance to WT: %{customdata[1]}"
-                       "<br>Reads %{value}"
+        hovertemplate=("<b>%{customdata[2]}</b><br>Hamming distance to WT: "
+                       "%{customdata[1]}<br>Reads %{value}"
                        "<br>%{percentRoot:.1%}<extra></extra>"),
     ))
     fig.update_layout(
@@ -908,18 +909,69 @@ _AA_BY_GROUP = [aa for group in _GROUP_ORDER
                 for aa in theme.AA_ORDER if theme.AA_GROUPS.get(aa) == group]
 
 
-def _normalised_mi(a: np.ndarray, b: np.ndarray) -> float:
-    """Mutual information of two codon columns over the smaller entropy, so 0 is
-    independence and 1 is one codon fully determining the other."""
+# Below this many distinct variants there is no library to judge at all.
+_MIN_VARIANTS = 10
+
+
+def _cooccurrence(pos_a: str, a_labels: np.ndarray, a: np.ndarray, pos_b: str,
+                  b_labels: np.ndarray, b: np.ndarray, top: int = 6) -> str:
+    """The residue pairings of two codons that depart most from what the two
+    residues' own frequencies predict: variants seen, variants expected and the
+    fold between them - so a pairing is not called notable merely for joining
+    two common residues."""
+    kb = len(b_labels)
+    seen = np.bincount(a * kb + b, minlength=len(a_labels) * kb).astype(float)
+    n = seen.sum()
+    expected = np.outer(np.bincount(a, minlength=len(a_labels)),
+                        np.bincount(b, minlength=kb)).ravel() / n
+    with np.errstate(invalid="ignore", divide="ignore"):
+        surprise = np.where(expected > 0, (seen - expected) ** 2 / expected, 0.0)
+        ratio = np.where(expected > 0, seen / expected, np.inf)
+    w = max(len(pos_a), len(pos_b), 1)
+    rows = [f"{a_labels[i // kb]:^{w}} + {b_labels[i % kb]:^{w}}"
+            f" {seen[i]:>5,.0f} {expected[i]:>6.1f}"
+            f" {'    -' if not np.isfinite(ratio[i]) else f'{ratio[i]:5.1f}x'}"
+            for i in np.argsort(surprise)[::-1][:top] if expected[i] > 0 or seen[i]]
+    return "<br>".join(
+        [f"<b>{pos_a:^{w}}   {pos_b:^{w}} {'seen':>5} {'exp':>6} {'fold':>6}</b>"]
+        + rows)
+
+
+def _chi2_p(chi2: float, df: int) -> float:
+    """Upper tail of the chi-square distribution (Wilson-Hilferty), so a pair can
+    quote a p-value without pulling in SciPy."""
+    if df <= 0 or chi2 <= 0:
+        return 1.0
+    z = ((chi2 / df) ** (1 / 3) - (1 - 2 / (9 * df))) / math.sqrt(2 / (9 * df))
+    return 0.5 * math.erfc(z / math.sqrt(2))
+
+
+def _association(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """How far two codons depart from independence, as a bias-corrected Cramer's
+    V over the variants given, with its chi-square p-value.
+
+    Plain V - like mutual information - runs high when the counts are thin: two
+    independent codons over 20 residues each score ~0.5 on 85 variants.
+    Bergsma's correction subtracts what independence alone would give, so the
+    number means the same thing at any size.
+    """
     kb = int(b.max()) + 1
-    joint = np.bincount(a * kb + b,
-                        minlength=(int(a.max()) + 1) * kb).reshape(-1, kb).astype(float)
-    joint /= joint.sum()
-    px, py = joint.sum(axis=1), joint.sum(axis=0)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        mi = np.nansum(joint * np.log2(joint / np.outer(px, py)))
-        entropy = min(-np.nansum(px * np.log2(px)), -np.nansum(py * np.log2(py)))
-    return float(mi / entropy) if entropy > 0 else 0.0
+    observed = np.bincount(a * kb + b,
+                           minlength=(int(a.max()) + 1) * kb).reshape(-1, kb).astype(float)
+    n = observed.sum()
+    r, c = observed.shape
+    if n < 2 or min(r, c) < 2:
+        return 0.0, 1.0
+    expected = np.outer(observed.sum(axis=1), observed.sum(axis=0)) / n
+    with np.errstate(invalid="ignore", divide="ignore"):
+        chi2 = float(np.nansum(np.where(expected > 0,
+                                        (observed - expected) ** 2 / expected, 0.0)))
+    phi2 = max(0.0, chi2 / n - (r - 1) * (c - 1) / (n - 1))
+    rows = r - (r - 1) ** 2 / (n - 1)
+    cols = c - (c - 1) ** 2 / (n - 1)
+    denominator = min(rows, cols) - 1
+    v = float(np.sqrt(phi2 / denominator)) if denominator > 0 else 0.0
+    return v, _chi2_p(chi2, (r - 1) * (c - 1))
 
 
 def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
@@ -938,7 +990,7 @@ def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
     paired = sampled and codon_matrix.shape[1] >= 2
     titles = [t for t, ok in (("Frequency of Hamming Distance to WT", graded),
                               ("Unique variants seen", sampled),
-                              ("Codon covariation", paired)) if ok]
+                              ("Amino Acid Pairing vs Expected", paired)) if ok]
     if not titles:
         return None
     at = {title: i + 1 for i, title in enumerate(titles)}
@@ -960,7 +1012,7 @@ def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
             hovertemplate="%{x} change(s) from the reference<br>%{y:,} variants, "
                           "%{customdata:.1f}% of reads<extra></extra>"), row=1, col=col)
         fig.update_xaxes(title_text="Amino-acid changes", dtick=1, row=1, col=col)
-        fig.update_yaxes(title_text="Frequency", row=1, col=col)
+        fig.update_yaxes(title_text="Number of Unique Variants", row=1, col=col)
 
     if sampled:
         col = at["Unique variants seen"]
@@ -1002,26 +1054,78 @@ def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
                          constrain="domain", row=1, col=col)
 
     if paired:
-        col = at["Codon covariation"]
+        col = at["Amino Acid Pairing vs Expected"]
         k = codon_matrix.shape[1]
         labels = [str(p) for p in positions[:k]]
+        # One variant, one vote, however many reads carry it: the question is
+        # which pairings the library holds, not how often they were sequenced.
+        variants, reads = np.unique(codon_matrix, axis=0, return_counts=True)
+        # Same rule as the treemap: a variant carrying a residue below the
+        # grouping threshold at its codon leaves the library view.
+        rare = _rare_aa_by_position(aa_counts, positions, min_frac)
+        if rare:
+            keep = np.ones(len(variants), dtype=bool)
+            for j, pos in enumerate(positions[:k]):
+                if pos in rare:
+                    keep &= ~np.isin(variants[:, j], list(rare[pos]))
+            variants, reads = variants[keep], reads[keep]
+        coded = [np.unique(variants[:, j], return_inverse=True) for j in range(k)]
+        total = f"{len(variants):,} variants \u00b7 {int(reads.sum()):,} reads"
         z = np.full((k, k), np.nan)
+        hover = [["" for _ in range(k)] for _ in range(k)]
+        # The hover box itself carries the verdict: green where the deviation is
+        # more than chance, red where it is not, grey where nothing can be said.
+        box = [[theme.PALETTE["surface"]] * k for _ in range(k)]
+        edge = [[theme.PALETTE["grid"]] * k for _ in range(k)]
+        evidenced: list[tuple[int, int]] = []
         for i in range(k):
             for j in range(i + 1, k):
-                z[i, j] = z[j, i] = _normalised_mi(codon_matrix[:, i],
-                                                   codon_matrix[:, j])
+                v, p = _association(coded[i][1], coded[j][1])
+                table = _cooccurrence(labels[i], *coded[i], labels[j], *coded[j])
+                head = f"<b>Codons {labels[i]} \u00d7 {labels[j]}</b><br>"
+                if len(variants) < _MIN_VARIANTS:
+                    # Nothing to judge: leave the cell blank rather than colour
+                    # in what is only sampling noise.
+                    hover[i][j] = hover[j][i] = (
+                        head + f"Only {len(variants)} variants \u00b7 too few "
+                        f"to judge<br>{table}")
+                    continue
+                z[i, j] = z[j, i] = v
+                # The verdict carries its own colour: green where the departure
+                # is more than chance, red where it is not.
+                evidence = p < 0.05
+                if evidence:
+                    evidenced.append((i, j))
+                verdict = FATE_COLORS["Variant"] if evidence else _RED
+                for x, y in ((i, j), (j, i)):
+                    box[x][y], edge[x][y] = _rgba(verdict, 0.16), verdict
+                note = (f"{v:.2f} deviation \u00b7 "
+                        # "<" would be read as a tag in the hover's HTML.
+                        + ("p&lt;0.001" if p < 0.001 else f"p={p:.2f}"))
+                hover[i][j] = hover[j][i] = f"{head}{note}<br>{total}<br>{table}"
         fig.add_trace(go.Heatmap(
             z=z, x=labels, y=labels, xgap=1, ygap=1, zmin=0, zmax=1,
+            text=hover,
+            hoverlabel=dict(font=dict(family="monospace", size=11,
+                                      color=theme.PALETTE["text"]),
+                            bgcolor=box, bordercolor=edge),
             colorscale=[[0.0, theme.PALETTE["surface"]], [0.35, "#CFE0E7"],
                         [1.0, theme.PALETTE["primary_dark"]]],
-            colorbar=dict(title=dict(text="Shared information", side="right"),
+            colorbar=dict(title=dict(text="Deviation from expected AA pairing",
+                                     side="right"),
                           x=1.0, xanchor="left", thickness=9, len=0.85,
                           outlinewidth=0, tickfont=dict(size=10), tickmode="array",
                           tickvals=[0, 0.25, 0.5, 0.75, 1.0],
-                          ticktext=["0 uncorrelated", "0.25", "0.5", "0.75",
-                                    "1 correlated"]),
-            hovertemplate="Codons %{y} and %{x}<br>%{z:.2f} of the smaller codon's "
-                          "variation explained<extra></extra>"), row=1, col=col)
+                          ticktext=["0 as expected", "0.25", "0.5", "0.75",
+                                    "1 fully linked"]),
+            hovertemplate="%{text}<extra></extra>"), row=1, col=col)
+        # A green outline marks the pairs whose departure is more than chance.
+        for i, j in evidenced:
+            for x, y in ((i, j), (j, i)):
+                fig.add_shape(type="rect", row=1, col=col, layer="above",
+                              x0=x - 0.5, x1=x + 0.5, y0=y - 0.5, y1=y + 0.5,
+                              fillcolor="rgba(0,0,0,0)",
+                              line=dict(color=FATE_COLORS["Variant"], width=2))
         # constrain="domain": square cells shrink the box rather than pad the
         # range, so the axes sit against the matrix.
         fig.update_xaxes(title_text="Diversified codon", type="category",
@@ -1035,13 +1139,16 @@ def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
     fig.update_layout(
         template=_T, title="", height=400, bargap=0.25,
         margin=dict(l=58, r=112, t=62, b=48),
-        meta={"subtitle": "Variant spread, sampling and codon independence",
+        meta={"subtitle": "Variant spread, sampling and amino acid pairing",
               "description":
               "Unique variants by how many amino-acid changes they carry from the "
               "reference, wild type in amber; the variants found as reads are "
               "sampled, over eight shuffles, against the diagonal where every "
-              "read is new; and the shared information between each pair of "
-              "diversified codons, on a scale fixed from 0 to 1."})
+              "read is new; and how far the amino acids at each pair of "
+              "diversified codons pair up differently from what their own "
+              "frequencies predict, over the library's distinct variants, each "
+              "counted once however often it was sequenced - the hover giving the "
+              "fold change of the pairings furthest from expected."})
     return fig
 
 

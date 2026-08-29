@@ -170,36 +170,38 @@ def read_codon_calls(msa: dict[str, str], ref_codons: list[tuple[int, int, int]]
 
 
 def call_matrix(calls: dict[str, tuple[str | None, ...]]) -> np.ndarray:
-    """Reads called at every position, amino acids as integer codes - the
-    pattern the sampling and covariation plots need, without the letters."""
+    """Reads called at every position, one column of amino acids per diversified
+    codon - what the sampling and covariation plots read."""
     rows = [c for c in calls.values() if c and all(aa is not None for aa in c)]
-    if not rows:
-        return np.empty((0, 0), dtype=np.int16)
-    arr = np.array(rows)
-    codes = np.empty(arr.shape, dtype=np.int16)
-    for j in range(arr.shape[1]):
-        codes[:, j] = np.unique(arr[:, j], return_inverse=True)[1]
-    return codes
+    return np.array(rows) if rows else np.empty((0, 0), dtype="<U1")
 
 
 def haplotype_counts(calls: dict[str, tuple[str | None, ...]],
-                     ref_calls: tuple[str | None, ...] | None, positions, *,
-                     unknown: str = "?", max_unknown: int = 0) -> pd.DataFrame:
+                     ref_calls: tuple[str | None, ...] | None,
+                     positions) -> pd.DataFrame:
     """Unique AA combinations over ``positions``, from the reads in ``calls``
-    (see :func:`read_codon_calls`) missing at most ``max_unknown`` of them; an
-    unreadable codon carries ``unknown`` and counts as a residue in its own
-    right. Columns: ``combo_label, combo_tuple, count, is_reference,
-    aa_hamming_distance``, descending by count."""
-    cols = ["combo_label", "combo_tuple", "count", "is_reference", "aa_hamming_distance"]
-    ctr: Counter = Counter(
-        tuple(c if c is not None else unknown for c in call)
-        for call in calls.values() if sum(c is None for c in call) <= max_unknown)
+    (see :func:`read_codon_calls`) called at every one of them. Columns:
+    ``combo_label, mutations, combo_tuple, count, is_reference,
+    aa_hamming_distance``, descending by count. ``mutations`` names only the
+    codons that differ from the reference, as ``A123T``."""
+    cols = ["combo_label", "mutations", "combo_tuple", "count", "is_reference",
+            "aa_hamming_distance"]
+    ctr: Counter = Counter(call for call in calls.values()
+                           if all(c is not None for c in call))
     if not ctr:
         return pd.DataFrame(columns=cols)
     ref_tuple = (tuple(ref_calls) if ref_calls and all(a is not None for a in ref_calls)
                  else None)
+    def mutations(tup) -> str:
+        if ref_tuple is None:
+            return ""
+        changed = [f"{ref}{p}{aa}" for p, aa, ref in zip(positions, tup, ref_tuple)
+                   if aa != ref]
+        return ", ".join(changed) if changed else "wild type"
+
     return pd.DataFrame([
         {"combo_label": " | ".join(f"{p}:{aa}" for p, aa in zip(positions, tup)),
+         "mutations": mutations(tup),
          "combo_tuple": tup,
          "count": cnt,
          "is_reference": tup == ref_tuple,

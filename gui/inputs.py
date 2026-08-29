@@ -161,18 +161,6 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
                  "~0.01 hides basecall noise.")
         st.caption("Raising it drops real library members too - in a diverse "
                    "library every residue is rare.")
-        # Bounded by the worst read of the last run: a higher tolerance than that
-        # cannot admit anything more.
-        worst = getattr(st.session_state.get("report"), "max_unknown_codons", 0)
-        max_unknown_codons = st.slider(
-            "Unknown codons tolerated", 0, worst or 1, 0, disabled=not worst,
-            help="Diversified codons a read may miss and still earn a treemap "
-                 "tile, each written '?' and counted as a residue of its own. "
-                 "0 keeps only fully called reads; the top is the worst read.")
-        if not worst:
-            max_unknown_codons = 0
-            st.caption("Nothing to tolerate: every read covers all the "
-                       "diversified codons, or has none to cover.")
 
         _tool_status()
         run = st.button("Run analysis", type="primary", use_container_width=True)
@@ -196,6 +184,5 @@ def render_sidebar() -> tuple[AnalysisParams | None, bool, str | None]:
         structural_insertion_bp=int(structural_insertion_bp),
         structural_deletion_bp=int(structural_deletion_bp),
         pie_positions=positions, pie_min_frac=float(pie_min_frac),
-        max_unknown_codons=int(max_unknown_codons),
         auto_codon_match_pct=float(auto_pct) if auto_pct is not None else None)
     return params, run, None
