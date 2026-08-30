@@ -281,11 +281,12 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
           cov.insertion_positions[ins_keep] - 1] = 4
     del_keep = ((cov.deletion_rows < order.size)
                 & (cov.deletion_lengths >= max(deletion_bp, 1)))
+    width = matrix.shape[1]
     for read, at, length in zip(cov.deletion_rows[~del_keep],
                                 cov.deletion_positions[~del_keep],
                                 cov.deletion_lengths[~del_keep]):
-        if read < order.size:
-            z[rank[read], at - 1:at - 1 + length] = np.nan
+        if read < order.size:                # a deletion may run past the origin
+            z[rank[read], (np.arange(at - 1, at - 1 + length) % width)] = np.nan
 
     x_max = cov.contig_length or int(ends.max())
     _T_MARGIN, _B_MARGIN = 60, 48
@@ -357,6 +358,7 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
                           np.maximum(1, length // _MARKS_PER_DELETION))
         cols = np.concatenate([np.arange(a, a + n, s)
                                for a, n, s in zip(at, length, stride)])
+        cols = (cols - 1) % width + 1        # the plasmid is circular
         repeats = -(-length // stride)
         del_rows = np.repeat(rank[cov.deletion_rows[del_keep]], repeats)
         del_lens = np.repeat(length, repeats)
