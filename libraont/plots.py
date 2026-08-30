@@ -122,7 +122,7 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
 
     fig = go.Figure()
     annotations = [_panel_title(0.31, "Read length distribution"),
-                   _panel_title(0.31, "Read quality distribution", y=0.41),
+                   _panel_title(0.31, "Read quality distribution", y=0.43),
                    _panel_title(0.86, "Reads kept")]
     if length_counts:
         bars, bins = _length_bars(length_counts, min_read_len, max_read_len)
@@ -131,13 +131,12 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
                         for value, label in ((min_read_len, "min"), (max_read_len, "max"))
                         if value is not None]
         if plasmid_len:
-            accent = theme.PALETTE["accent"]
             label = _cutoff_line(fig, "x", "y", plasmid_len,
-                                 f"plasmid ({plasmid_len:,} bp)", accent, width=1.4)
-            # Above the panel: the peak of whole-plasmid reads sits under this
-            # line, and the max cutoff usually sits beside it.
-            label.update(y=1.01, yanchor="bottom",
-                         xanchor="right" if plasmid_len >= bins[-1] else "center")
+                                 f"plasmid ({plasmid_len:,} bp)",
+                                 theme.PALETTE["accent"], width=1.4)
+            # Level with min and max; anchored inward at the right-hand edge.
+            if plasmid_len >= bins[-1]:
+                label.update(xanchor="right")
             annotations.append(label)
     if phred_counts:
         fig.add_trace(_quality_bars(phred_counts, min_phred).update(xaxis="x2",
@@ -157,7 +156,7 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
         "is every way a read can end up.")
     fig.update_layout(
         template=_T, title="Read Dataset and Filtering", height=560, bargap=0.05,
-        showlegend=False, margin=dict(l=56, r=24, t=56, b=44),
+        showlegend=False, margin=dict(l=56, r=24, t=72, b=44),
         annotations=annotations,
         # The two histograms stack in the left column; the ring sits beside them.
         xaxis=dict(domain=[0.0, 0.62], anchor="y", title_text="Read length bin (bp)"),
@@ -188,12 +187,13 @@ def _cutoff_line(fig: go.Figure, xref: str, yref: str, at: float, label: str,
     """Draw a dashed cutoff across its panel; return the label to go with it."""
     fig.add_shape(type="line", xref=xref, yref=f"{yref} domain", x0=at, x1=at,
                   y0=0, y1=1, line=dict(color=colour, width=width, dash=dash))
-    return dict(xref=xref, yref=f"{yref} domain", x=at, y=0.99, yanchor="top",
+    # Just above the bars, in the gap under the panel's own heading.
+    return dict(xref=xref, yref=f"{yref} domain", x=at, y=1.01, yanchor="bottom",
                 xanchor="right" if label == "max" else "left", text=label,
                 showarrow=False, font=dict(size=11, color=colour))
 
 
-def _panel_title(x: float, text: str, y: float = 1.02) -> dict:
+def _panel_title(x: float, text: str, y: float = 1.05) -> dict:
     """Heading over one of the summary's panels."""
     return dict(x=x, y=y, xref="paper", yref="paper", xanchor="center",
                 yanchor="bottom", showarrow=False, text=text,
