@@ -311,8 +311,8 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
         tracks.append(("bp", bases))
 
     rows = len(tracks) + 2
-    heights = {2: [0.06, 0.05, 0.30, 0.59], 1: [0.07, 0.30, 0.63]}.get(
-        len(tracks), [0.30, 0.70])
+    heights = {2: [0.045, 0.04, 0.10, 0.815], 1: [0.05, 0.10, 0.85]}.get(
+        len(tracks), [0.10, 0.90])
     fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=heights,
                         vertical_spacing=0.025)
     trace_row, map_row = len(tracks) + 1, len(tracks) + 2
