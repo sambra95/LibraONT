@@ -110,11 +110,10 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
                         min_phred: int | None = None,
                         plasmid_len: int | None = None) -> go.Figure:
     """The read set as it arrives: read length, mean read quality, and what the
-    two cutoffs keep. Bars a cutoff excludes are red, as is the slice they
-    account for. The funnel below carries on from here."""
+    two cutoffs keep. Bars a cutoff excludes are red, as are the cutoff lines
+    and the slice they account for. The funnel below carries on from here."""
     if not length_counts and not phred_counts:
         return _empty("No reads found", "Read Dataset and Filtering")
-    muted = theme.PALETTE["muted"]
     # The funnel already counts what the filters keep, stage by stage.
     counts = {s.label: s.count for s in funnel if s.count is not None}
     n_input = counts.get("Reads in FASTQ", sum(length_counts.values()))
@@ -128,7 +127,7 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
     if length_counts:
         bars, bins = _length_bars(length_counts, min_read_len, max_read_len)
         fig.add_trace(bars)
-        annotations += [_cutoff_line(fig, "x", "y", value, label, muted)
+        annotations += [_cutoff_line(fig, "x", "y", value, label, _RED)
                         for value, label in ((min_read_len, "min"), (max_read_len, "max"))
                         if value is not None]
         if plasmid_len:
@@ -145,7 +144,7 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
                                                                    yaxis="y2"))
         if min_phred is not None:
             annotations.append(_cutoff_line(fig, "x2", "y2", min_phred - 0.5,
-                                            f"Q{min_phred}", muted))
+                                            f"Q{min_phred}", _RED))
     if n_input:
         fig.add_trace(_kept_pie(n_input, n_length_kept, n_quality_kept, min_phred)
                       .update(domain=dict(x=[0.72, 1.0], y=[0.08, 0.92])))
@@ -235,6 +234,10 @@ for _base in "ACGTN":
 # A base is one pixel over a whole plasmid, so every departure also gets a
 # square marker; otherwise the map reads as uniform grey.
 _EVENT_MARKER = dict(size=3, symbol="square", line=dict(width=0))
+# A deletion under this width gets a marker per base, so it cannot vanish
+# between pixels; a wider one is a visible block already and carries this many
+# markers, purely to keep its size reachable on hover.
+_DENSE_DELETION, _MARKS_PER_DELETION = 200, 6
 
 
 def match_percent(cov: ReadMap) -> np.ndarray:
@@ -327,50 +330,45 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
         hovertemplate="Position %{x}<br>read row %{y}<extra></extra>"),
         row=map_row, col=1)
 
-    # A marker per coloured cell, so no departure is lost to being one pixel
-    # wide. Taken from the rendered z, not the raw matrix: an insertion repaints
-    # the cell it begins before, which must not also claim a substitution.
+    # A marker per event, so no departure is lost to being one pixel wide.
+    def events(x, y, colour: str, customdata, hover: str) -> None:
+        fig.add_trace(go.Scatter(
+            x=x, y=y, mode="markers", showlegend=False, customdata=customdata,
+            marker=dict(color=colour, **_EVENT_MARKER), hovertemplate=hover),
+            row=map_row, col=1)
+
+    # Substitutions come from the rendered z, not the raw matrix: an insertion
+    # repaints the cell it begins before, which must not also claim one.
     sub_rows, sub_cols = np.nonzero((z == 2) | (z >= 5))
     if sub_rows.size:
         # Each marker names the change: reference base -> the read's own base.
         alt = _SUB_LETTER[z[sub_rows, sub_cols].astype(int)]
         ref_bases = np.frombuffer(cov.contig_seq.upper().encode(), dtype=np.uint8)
-        change = (np.char.add(np.char.add(_BASE_LETTER[ref_bases[sub_cols]], "→"), alt)
-                  if ref_bases.size >= matrix.shape[1] else alt)
-        fig.add_trace(go.Scatter(
-            x=sub_cols + 1, y=sub_rows, mode="markers", showlegend=False,
-            marker=dict(color=_SUBSTITUTION_AMBER, **_EVENT_MARKER),
-            customdata=change,
-            hovertemplate="Substitution %{customdata} at position %{x}"
-                          "<extra></extra>"),
-            row=map_row, col=1)
+        events(sub_cols + 1, sub_rows, _SUBSTITUTION_AMBER,
+               np.char.add(np.char.add(_BASE_LETTER[ref_bases[sub_cols]], "→"), alt)
+               if ref_bases.size >= matrix.shape[1] else alt,
+               "Substitution %{customdata} at position %{x}<extra></extra>")
 
-    del_rows, del_cols = np.nonzero(z == 3)
-    if del_rows.size:
-        # Each deleted base carries the length of the deletion it belongs to.
-        spans = {}
-        for read, at, length in zip(cov.deletion_rows[del_keep],
-                                    cov.deletion_positions[del_keep],
-                                    cov.deletion_lengths[del_keep]):
-            for offset in range(length):
-                spans[(rank[read], at - 1 + offset)] = length
-        fig.add_trace(go.Scatter(
-            x=del_cols + 1, y=del_rows, mode="markers", showlegend=False,
-            marker=dict(color=_DELETION_RED, **_EVENT_MARKER),
-            customdata=[spans.get((r, c), 0) for r, c in zip(del_rows, del_cols)],
-            hovertemplate="Deletion of %{customdata:,} bp<br>"
-                          "at position %{x}<extra></extra>"),
-            row=map_row, col=1)
+    if del_keep.any():
+        # Sampled along each deletion, and kept where the cell still reads as
+        # deleted, so every marker carries its own deletion's length.
+        at, length = cov.deletion_positions[del_keep], cov.deletion_lengths[del_keep]
+        stride = np.where(length <= _DENSE_DELETION, 1,
+                          np.maximum(1, length // _MARKS_PER_DELETION))
+        cols = np.concatenate([np.arange(a, a + n, s)
+                               for a, n, s in zip(at, length, stride)])
+        repeats = -(-length // stride)
+        del_rows = np.repeat(rank[cov.deletion_rows[del_keep]], repeats)
+        del_lens = np.repeat(length, repeats)
+        keep = z[del_rows, cols - 1] == 3
+        if keep.any():
+            events(cols[keep], del_rows[keep], _DELETION_RED, del_lens[keep],
+                   "Deletion of %{customdata:,} bp<br>at position %{x}<extra></extra>")
 
     if ins_keep.any():
-        fig.add_trace(go.Scatter(
-            x=cov.insertion_positions[ins_keep],
-            y=rank[cov.insertion_rows[ins_keep]], mode="markers", showlegend=False,
-            marker=dict(color=_INSERTION_BLUE, **_EVENT_MARKER),
-            customdata=cov.insertion_lengths[ins_keep],
-            hovertemplate="Insertion of %{customdata:,} bp<br>"
-                          "before position %{x}<extra></extra>"),
-            row=map_row, col=1)
+        events(cov.insertion_positions[ins_keep], rank[cov.insertion_rows[ins_keep]],
+               _INSERTION_BLUE, cov.insertion_lengths[ins_keep],
+               "Insertion of %{customdata:,} bp<br>before position %{x}<extra></extra>")
 
     if cov.region and not tracks:
         _insert_marker(fig, cov.region["start"], cov.region["end"])
@@ -529,7 +527,9 @@ def plasmid_map_figure(cov: ReadMap, auto_match_threshold: float | None = None
     match_colour, cover_colour = theme.PALETTE["primary"], theme.PALETTE["accent"]
     qual_colour = "#7D6FB0"
     fig = go.Figure()
-    _ring_panel(fig, cov, covered, np.full(covered.size, reads),
+    # Depth, not held bases: a read whose alignment deletes a base still spans
+    # it, and the deletion is the read's verdict on that base, not a blind spot.
+    _ring_panel(fig, cov, depth, np.full(depth.size, reads),
                 subplot="polar", colour=cover_colour, title="Read<br>coverage",
                 hover="Position %{customdata[0]:,.0f} bp<br>"
                       "%{customdata[1]:.1f}% of reads cover it "
@@ -558,8 +558,9 @@ def plasmid_map_figure(cov: ReadMap, auto_match_threshold: float | None = None
         meta={"subtitle": "Coverage, quality and match around the plasmid",
               "description":
               f"The plasmid as the circle it is, three times over {reads:,} mapped "
-              "reads: how many of them reach each base, how well basecalled they "
-              "are there, and how many of the covering reads match the reference. "
+              "reads: how many of them reach each base (a base a read deletes "
+              "counts as reached), how well basecalled they are there, and how "
+              "many of the covering reads match the reference. "
               "On all three the grey ring is the backbone, the red arc the insert, "
               "and position runs clockwise from the top."})
     return fig
@@ -570,11 +571,25 @@ FATE_COLORS: dict[str, str] = {
     "Variant": "#1F6F5C",
     "Ambiguous diversity": "#9FB6C4",
     "Wild type": "#E8913C",
-    "Deletion": "#D8C13F",
-    "Insertion": _RED,
-    # Neutral greys, darkening with severity.
-    "Does not contain insert region": "#646C73",
+    # The same red and blue the read-by-read map uses for the two defects.
+    "Deletion": _DELETION_RED,
+    "Insertion": _INSERTION_BLUE,
 }
+
+
+def _letter_track(x, letters, colors, *, width: float, size: int,
+                  yaxis: str | None, hovers: list[str] | None = None) -> go.Bar:
+    """A band of coloured blocks, one per position, lettered where one fits."""
+    bar = go.Bar(x=x, y=[1] * len(x), width=width, showlegend=False,
+                 marker=dict(color=colors, line=dict(width=0)),
+                 text=letters, textposition="inside", insidetextanchor="middle",
+                 textangle=0,   # never let Plotly rotate letters in narrow blocks
+                 textfont=dict(family="monospace", size=size,
+                               color=[theme.contrast_text(c) for c in colors]),
+                 hovertext=hovers, hoverinfo="text" if hovers else "skip")
+    return bar.update(yaxis=yaxis) if yaxis else bar
+
+
 def _aa_track(ref_seq: str, length: int, frame_offset: int, *,
               yaxis: str | None = "y2", origin: int = 1, step: int = 1,
               number_labels: bool = False) -> go.Bar | None:
@@ -591,17 +606,8 @@ def _aa_track(ref_seq: str, length: int, frame_offset: int, *,
         hovers.append(f"Codon {codon}: {aa} ({_AA_NAMES.get(aa, aa)})")
     if not centres:
         return None
-    bar = go.Bar(x=centres, y=[1] * len(centres), width=3,
-                 marker=dict(color=colors, line=dict(width=0)),
-                 text=letters, textposition="inside", insidetextanchor="middle",
-                 textangle=0,  # never let Plotly rotate letters in narrow blocks
-                 textfont=dict(family="monospace", size=11,
-                               color=[theme.contrast_text(c) for c in colors]),
-                 showlegend=False,
-                 hovertext=hovers, hoverinfo="text" if number_labels else "skip")
-    if yaxis:
-        bar.update(yaxis=yaxis)
-    return bar
+    return _letter_track(centres, letters, colors, width=3, size=11, yaxis=yaxis,
+                         hovers=hovers if number_labels else None)
 
 
 def _base_track(ref_seq: str, length: int, yaxis: str | None = "y3", *,
@@ -613,17 +619,8 @@ def _base_track(ref_seq: str, length: int, yaxis: str | None = "y3", *,
     if not bases:
         return None
     colors = [theme.BASE_COLORS.get(b, theme.PALETTE["muted"]) for b in bases]
-    bar = go.Bar(x=[origin + step * i for i in range(len(bases))],
-                 y=[1] * len(bases), width=1,
-                 marker=dict(color=colors, line=dict(width=0)),
-                 text=list(bases), textposition="inside",
-                 insidetextanchor="middle", textangle=0,
-                 textfont=dict(family="monospace", size=9,
-                               color=[theme.contrast_text(c) for c in colors]),
-                 showlegend=False, hoverinfo="skip")
-    if yaxis:
-        bar.update(yaxis=yaxis)
-    return bar
+    return _letter_track([origin + step * i for i in range(len(bases))],
+                         list(bases), colors, width=1, size=9, yaxis=yaxis)
 
 
 def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "-",
@@ -784,7 +781,8 @@ def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *,
                     line=dict(color="#000000", width=1),
                 ),
                 textinfo="label+percent", textposition="inside",
-                hovertemplate="%{customdata}<br>Count %{value:.0f}<br>%{percent:.2%}<extra></extra>",
+                hovertemplate="%{customdata}<br>Count %{value:.0f}<br>"
+                              "%{percent:.2%}<extra></extra>",
                 showlegend=False,
             ), row=r, col=c)
 
@@ -909,88 +907,20 @@ _AA_BY_GROUP = [aa for group in _GROUP_ORDER
                 for aa in theme.AA_ORDER if theme.AA_GROUPS.get(aa) == group]
 
 
-# Below this many distinct variants there is no library to judge at all.
-_MIN_VARIANTS = 10
-
-
-def _cooccurrence(pos_a: str, a_labels: np.ndarray, a: np.ndarray, pos_b: str,
-                  b_labels: np.ndarray, b: np.ndarray, top: int = 6) -> str:
-    """The residue pairings of two codons that depart most from what the two
-    residues' own frequencies predict: variants seen, variants expected and the
-    fold between them - so a pairing is not called notable merely for joining
-    two common residues."""
-    kb = len(b_labels)
-    seen = np.bincount(a * kb + b, minlength=len(a_labels) * kb).astype(float)
-    n = seen.sum()
-    expected = np.outer(np.bincount(a, minlength=len(a_labels)),
-                        np.bincount(b, minlength=kb)).ravel() / n
-    with np.errstate(invalid="ignore", divide="ignore"):
-        surprise = np.where(expected > 0, (seen - expected) ** 2 / expected, 0.0)
-        ratio = np.where(expected > 0, seen / expected, np.inf)
-    w = max(len(pos_a), len(pos_b), 1)
-    rows = [f"{a_labels[i // kb]:^{w}} + {b_labels[i % kb]:^{w}}"
-            f" {seen[i]:>5,.0f} {expected[i]:>6.1f}"
-            f" {'    -' if not np.isfinite(ratio[i]) else f'{ratio[i]:5.1f}x'}"
-            for i in np.argsort(surprise)[::-1][:top] if expected[i] > 0 or seen[i]]
-    return "<br>".join(
-        [f"<b>{pos_a:^{w}}   {pos_b:^{w}} {'seen':>5} {'exp':>6} {'fold':>6}</b>"]
-        + rows)
-
-
-def _chi2_p(chi2: float, df: int) -> float:
-    """Upper tail of the chi-square distribution (Wilson-Hilferty), so a pair can
-    quote a p-value without pulling in SciPy."""
-    if df <= 0 or chi2 <= 0:
-        return 1.0
-    z = ((chi2 / df) ** (1 / 3) - (1 - 2 / (9 * df))) / math.sqrt(2 / (9 * df))
-    return 0.5 * math.erfc(z / math.sqrt(2))
-
-
-def _association(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
-    """How far two codons depart from independence, as a bias-corrected Cramer's
-    V over the variants given, with its chi-square p-value.
-
-    Plain V - like mutual information - runs high when the counts are thin: two
-    independent codons over 20 residues each score ~0.5 on 85 variants.
-    Bergsma's correction subtracts what independence alone would give, so the
-    number means the same thing at any size.
-    """
-    kb = int(b.max()) + 1
-    observed = np.bincount(a * kb + b,
-                           minlength=(int(a.max()) + 1) * kb).reshape(-1, kb).astype(float)
-    n = observed.sum()
-    r, c = observed.shape
-    if n < 2 or min(r, c) < 2:
-        return 0.0, 1.0
-    expected = np.outer(observed.sum(axis=1), observed.sum(axis=0)) / n
-    with np.errstate(invalid="ignore", divide="ignore"):
-        chi2 = float(np.nansum(np.where(expected > 0,
-                                        (observed - expected) ** 2 / expected, 0.0)))
-    phi2 = max(0.0, chi2 / n - (r - 1) * (c - 1) / (n - 1))
-    rows = r - (r - 1) ** 2 / (n - 1)
-    cols = c - (c - 1) ** 2 / (n - 1)
-    denominator = min(rows, cols) - 1
-    v = float(np.sqrt(phi2 / denominator)) if denominator > 0 else 0.0
-    return v, _chi2_p(chi2, (r - 1) * (c - 1))
-
-
 def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
                           positions, *, aa_counts: pd.DataFrame | None = None,
                           min_frac: float = 0.0, replicates: int = 8,
                           points: int = 120) -> go.Figure | None:
-    """The library's variants three ways, in one row: how far each sits from the
-    reference, whether the sequencing has seen them all, and whether the
-    diversified codons vary independently. A panel is left out when its data
-    cannot say anything."""
+    """The library's variants two ways, in one row: how far each sits from the
+    reference, and whether the sequencing has seen them all. A panel is left out
+    when its data cannot say anything."""
     df = _drop_rare_variants(hap_df, aa_counts, positions, min_frac)
     distances = pd.to_numeric(df["aa_hamming_distance"], errors="coerce") \
         if not df.empty else None
     graded = distances is not None and distances.notna().any()
     sampled = codon_matrix is not None and codon_matrix.shape[0] >= 2
-    paired = sampled and codon_matrix.shape[1] >= 2
     titles = [t for t, ok in (("Frequency of Hamming Distance to WT", graded),
-                              ("Unique variants seen", sampled),
-                              ("Amino Acid Pairing vs Expected", paired)) if ok]
+                              ("Unique variants seen", sampled)) if ok]
     if not titles:
         return None
     at = {title: i + 1 for i, title in enumerate(titles)}
@@ -1045,110 +975,20 @@ def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
             hovertemplate="%{x:,} reads<br>%{y:,.0f} variants "
                           "(%{customdata:.1f}% of all seen)<extra></extra>"),
             row=1, col=col)
-        # One read to one variant on both axes, so the diagonal is 45 degrees
-        # and the panel is square.
-        fig.update_xaxes(title_text="Reads sampled", range=[0, n],
-                         constrain="domain", row=1, col=col)
-        fig.update_yaxes(title_text="Unique variants", range=[0, n],
-                         scaleanchor=f"x{col if col > 1 else ''}", scaleratio=1,
-                         constrain="domain", row=1, col=col)
-
-    if paired:
-        col = at["Amino Acid Pairing vs Expected"]
-        k = codon_matrix.shape[1]
-        labels = [str(p) for p in positions[:k]]
-        # One variant, one vote, however many reads carry it: the question is
-        # which pairings the library holds, not how often they were sequenced.
-        variants, reads = np.unique(codon_matrix, axis=0, return_counts=True)
-        # Same rule as the treemap: a variant carrying a residue below the
-        # grouping threshold at its codon leaves the library view.
-        rare = _rare_aa_by_position(aa_counts, positions, min_frac)
-        if rare:
-            keep = np.ones(len(variants), dtype=bool)
-            for j, pos in enumerate(positions[:k]):
-                if pos in rare:
-                    keep &= ~np.isin(variants[:, j], list(rare[pos]))
-            variants, reads = variants[keep], reads[keep]
-        coded = [np.unique(variants[:, j], return_inverse=True) for j in range(k)]
-        total = f"{len(variants):,} variants \u00b7 {int(reads.sum()):,} reads"
-        z = np.full((k, k), np.nan)
-        hover = [["" for _ in range(k)] for _ in range(k)]
-        # The hover box itself carries the verdict: green where the deviation is
-        # more than chance, red where it is not, grey where nothing can be said.
-        box = [[theme.PALETTE["surface"]] * k for _ in range(k)]
-        edge = [[theme.PALETTE["grid"]] * k for _ in range(k)]
-        evidenced: list[tuple[int, int]] = []
-        for i in range(k):
-            for j in range(i + 1, k):
-                v, p = _association(coded[i][1], coded[j][1])
-                table = _cooccurrence(labels[i], *coded[i], labels[j], *coded[j])
-                head = f"<b>Codons {labels[i]} \u00d7 {labels[j]}</b><br>"
-                if len(variants) < _MIN_VARIANTS:
-                    # Nothing to judge: leave the cell blank rather than colour
-                    # in what is only sampling noise.
-                    hover[i][j] = hover[j][i] = (
-                        head + f"Only {len(variants)} variants \u00b7 too few "
-                        f"to judge<br>{table}")
-                    continue
-                z[i, j] = z[j, i] = v
-                # The verdict carries its own colour: green where the departure
-                # is more than chance, red where it is not.
-                evidence = p < 0.05
-                if evidence:
-                    evidenced.append((i, j))
-                verdict = FATE_COLORS["Variant"] if evidence else _RED
-                for x, y in ((i, j), (j, i)):
-                    box[x][y], edge[x][y] = _rgba(verdict, 0.16), verdict
-                note = (f"{v:.2f} deviation \u00b7 "
-                        # "<" would be read as a tag in the hover's HTML.
-                        + ("p&lt;0.001" if p < 0.001 else f"p={p:.2f}"))
-                hover[i][j] = hover[j][i] = f"{head}{note}<br>{total}<br>{table}"
-        fig.add_trace(go.Heatmap(
-            z=z, x=labels, y=labels, xgap=1, ygap=1, zmin=0, zmax=1,
-            text=hover,
-            hoverlabel=dict(font=dict(family="monospace", size=11,
-                                      color=theme.PALETTE["text"]),
-                            bgcolor=box, bordercolor=edge),
-            colorscale=[[0.0, theme.PALETTE["surface"]], [0.35, "#CFE0E7"],
-                        [1.0, theme.PALETTE["primary_dark"]]],
-            colorbar=dict(title=dict(text="Deviation from expected AA pairing",
-                                     side="right"),
-                          x=1.0, xanchor="left", thickness=9, len=0.85,
-                          outlinewidth=0, tickfont=dict(size=10), tickmode="array",
-                          tickvals=[0, 0.25, 0.5, 0.75, 1.0],
-                          ticktext=["0 as expected", "0.25", "0.5", "0.75",
-                                    "1 fully linked"]),
-            hovertemplate="%{text}<extra></extra>"), row=1, col=col)
-        # A green outline marks the pairs whose departure is more than chance.
-        for i, j in evidenced:
-            for x, y in ((i, j), (j, i)):
-                fig.add_shape(type="rect", row=1, col=col, layer="above",
-                              x0=x - 0.5, x1=x + 0.5, y0=y - 0.5, y1=y + 0.5,
-                              fillcolor="rgba(0,0,0,0)",
-                              line=dict(color=FATE_COLORS["Variant"], width=2))
-        # constrain="domain": square cells shrink the box rather than pad the
-        # range, so the axes sit against the matrix.
-        fig.update_xaxes(title_text="Diversified codon", type="category",
-                         showgrid=False, ticks="", title_standoff=6,
-                         constrain="domain", row=1, col=col)
-        fig.update_yaxes(title_text="Diversified codon", type="category",
-                         showgrid=False, ticks="", title_standoff=4,
-                         ticklabelstandoff=-6, constrain="domain",
-                         autorange="reversed", scaleanchor=f"x{col}", row=1, col=col)
+        # Both axes run 0..n, so the diagonal spans the panel corner to corner
+        # however wide it is drawn.
+        fig.update_xaxes(title_text="Reads sampled", range=[0, n], row=1, col=col)
+        fig.update_yaxes(title_text="Unique variants", range=[0, n], row=1, col=col)
 
     fig.update_layout(
         template=_T, title="", height=400, bargap=0.25,
-        margin=dict(l=58, r=112, t=62, b=48),
-        meta={"subtitle": "Variant spread, sampling and amino acid pairing",
+        margin=dict(l=58, r=24, t=62, b=48),
+        meta={"subtitle": "Variant spread and sampling",
               "description":
               "Unique variants by how many amino-acid changes they carry from the "
               "reference, wild type in amber; the variants found as reads are "
               "sampled, over eight shuffles, against the diagonal where every "
-              "read is new; and how far the amino acids at each pair of "
-              "diversified codons pair up differently from what their own "
-              "frequencies predict, over the library's distinct variants, each "
-              "counted once however often it was sequenced - the hover giving the "
-              "fold change of the pairings furthest from expected."})
+              "read is new."})
     return fig
 
 
@@ -1222,9 +1062,6 @@ _DIVERSITY_HOVER = {
     "Ambiguous diversity": "carry no detected change, but do not cover every "
                            "diversified codon",
 }
-_EMPTY = "No insert (empty vector)"
-
-
 def _funnel_sankey(funnel, fates=(), insertion_bp: int = 0, deletion_bp: int = 0,
                    band: tuple[float, float] = (0.13, 0.80)) -> tuple | None:
     """The funnel as (trace, annotations) in the paper band ``band``; ``None``
@@ -1240,22 +1077,14 @@ def _funnel_sankey(funnel, fates=(), insertion_bp: int = 0, deletion_bp: int = 0
                 len(stages) - 1)
     stages = stages[:last + 1]
     counts = {f.label: f.count for f in fates}
-    # Losses from these steps are verdicts on a read that reached the insert, so
-    # they run to the edge instead of stopping under their own column - the
-    # structural step splitting into the two kinds of defect.
-    to_edge = {
-        "Contains the insert": [
-            (_EMPTY, "Does not contain insert region",
-             FATE_COLORS["Does not contain insert region"])],
-        "Correctly assembled": [
-            (k, k, FATE_COLORS[k]) for k in ("Deletion", "Insertion")],
-    }
     hover_for = dict(_DIVERSITY_HOVER,
-                     Deletion=f"carry a deletion ≥ {deletion_bp} bp",
+                     Deletion=f"carry a deletion ≥ {deletion_bp} bp, or no "
+                              "insert at all",
                      Insertion=f"carry an insertion ≥ {insertion_bp} bp")
-    call = [(label, counts[label], FATE_COLORS[label], hover_for[label], label)
-            for label in ("Variant", "Wild type", "Ambiguous diversity")
-            if label in counts]
+    # Losses from this step are verdicts on a read that reached the insert, so
+    # they run to the edge instead of stopping under their own column.
+    to_edge = {"Correctly assembled": [(k, counts.get(k, 0), hover_for[k])
+                                       for k in ("Deletion", "Insertion")]}
 
     n, start = len(stages), stages[0].count or 1
     # Zero-width links vanish in Plotly, so give them a sliver of the total.
@@ -1288,41 +1117,46 @@ def _funnel_sankey(funnel, fates=(), insertion_bp: int = 0, deletion_bp: int = 0
         hover.append(f"<b>{b.count:,} reads</b> {b.passed or 'carried on'}")
         colors.append(_rgba(pal["primary"], 0.32))
         if b.label in to_edge:
-            tail.append([(label, counts.get(fate, gone), tint,
-                          f"<b>{counts.get(fate, gone):,} reads</b> "
-                          f"{hover_for.get(fate) or b.failed or 'were removed'}",
-                          i, fate)
-                         for label, fate, tint in to_edge[b.label]])
+            tail.append([(fate, count, note, i) for fate, count, note in to_edge[b.label]])
             continue
         src.append(i)
         tgt.append(len(xs))
         value.append(lost[i])
         hover.append(note)
-        colors.append(_rgba(_RED, 0.42))
+        # Grey, not red: red is a defect in the library (see ``FATE_COLORS``),
+        # while these reads are simply set aside before it can be judged.
+        colors.append(_rgba(pal["muted"], 0.36))
         drops.append((xs[i + 1], b.lost or "removed", gone))
         xs.append(xs[i + 1])
         ys.append(floor - 0.5 * lost[i] / depth)
-        tints.append(_RED)
+        tints.append(pal["muted"])
         caps.append(note)
 
     # Everything that ends the story lands in one column, the trunk's own
     # continuation on top and each verdict stacked below it in the order it left.
-    edge = [(label, count, tint, f"<b>{count:,} reads</b> {note}", n - 1, fate)
-            for label, count, tint, note, fate in call]
-    edge += [item for group in reversed(tail) for item in group]
-    ends = [max(count, hair) for _, count, _, _, _, _ in edge]
+    # One node per fate, however many steps feed it.
+    edge: dict[str, list] = {label: [(n - 1, counts[label], hover_for[label])]
+                             for label in ("Variant", "Wild type", "Ambiguous diversity")
+                             if label in counts}
+    for group in reversed(tail):
+        for fate, count, note, source in group:
+            edge.setdefault(fate, []).append((source, count, note))
+    totals = [sum(c for _, c, _ in links) for links in edge.values()]
+    ends = [max(t, hair) for t in totals]
     splay = min(0.13, (0.95 - crest - sum(ends) / depth) / max(1, len(edge) - 1))
     fan, top = len(xs), crest
-    for j, (label, count, tint, note, source, _) in enumerate(edge):
-        src.append(source)
-        tgt.append(len(xs))
-        value.append(ends[j])
-        hover.append(note)
-        colors.append(_rgba(tint, 0.42))
+    for j, (fate, links) in enumerate(edge.items()):
+        tint = FATE_COLORS[fate]
+        for source, count, note in links:
+            src.append(source)
+            tgt.append(fan + j)
+            value.append(max(count, hair))
+            hover.append(f"<b>{count:,} reads</b> {note}")
+            colors.append(_rgba(tint, 0.42))
         xs.append(0.02 + right + 0.05)
         ys.append(top + 0.5 * ends[j] / depth)
         tints.append(tint)
-        caps.append(f"<b>{label}</b><br>{count:,} reads")
+        caps.append(f"<b>{fate}</b><br>{totals[j]:,} reads")
         top += ends[j] / depth + splay
 
     src.append(len(xs))                      # the invisible scale-setter
@@ -1354,14 +1188,14 @@ def _funnel_sankey(funnel, fates=(), insertion_bp: int = 0, deletion_bp: int = 0
              for i, s in enumerate(stages)]
     notes += [dict(x=x, y=lo - 0.015, yanchor="top", xanchor="center",
                    text=f"{'<br>'.join(textwrap.wrap(label, 18))}<br><b>{gone:,}</b>",
-                   font=dict(size=10.5, color=_RED))
+                   font=dict(size=10.5, color=pal["muted"]))
               for x, label, gone in drops]
     notes += [dict(x=xs[fan + j] + 0.012, y=hi - (hi - lo) * ys[fan + j],
                    xanchor="left", yanchor="middle",
-                   text=f"<b>{'<br>'.join(textwrap.wrap(label, 14))}</b><br>"
-                        f"{count:,} · {count / start:.0%}",
-                   font=dict(size=10.5, color=tint))
-              for j, (label, count, tint, _, _, _) in enumerate(edge)]
+                   text=f"<b>{'<br>'.join(textwrap.wrap(fate, 14))}</b><br>"
+                        f"{totals[j]:,} · {totals[j] / start:.0%}",
+                   font=dict(size=10.5, color=FATE_COLORS[fate]))
+              for j, fate in enumerate(edge)]
 
     trace = go.Sankey(
         arrangement="fixed", domain=dict(x=[0, 1], y=[lo, hi]),

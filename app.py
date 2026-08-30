@@ -27,8 +27,8 @@ if run_clicked:
     else:
         progress = st.progress(0.0, text="Starting…")
         try:
-            report = runner.run_analysis(params, progress=lambda f, m: progress.progress(f, text=m))
-            st.session_state["report"] = report
+            st.session_state["report"] = runner.run_analysis(
+                params, progress=lambda f, m: progress.progress(f, text=m))
         except Exception as exc:
             st.session_state.pop("report", None)
             st.error(f"Analysis failed: {exc}")

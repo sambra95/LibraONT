@@ -78,19 +78,6 @@ def _insert_note(report: Report) -> str | None:
             "codon and amino-acid analysis; check the start and stop positions.")
 
 
-def _samtools_note(report: Report) -> str | None:
-    """Caveat for a plasmid given without the tool that maps reads to it."""
-    if report.params.plasmid_seq and report.read_map is None:
-        return ("Read alignment map skipped - samtools was not found on PATH "
-                "(activate the `libraont` conda environment).")
-    return None
-
-
-def _warnings(report: Report) -> list[str]:
-    """Caveats shown above the results, in the app and in the report."""
-    return [note for note in (_insert_note(report), _samtools_note(report)) if note]
-
-
 def _parameter_rows(report: Report) -> list[tuple[str, str]]:
     """Readable analysis parameters for the downloaded HTML report."""
     p = report.params
@@ -123,36 +110,34 @@ def _parameter_rows(report: Report) -> list[tuple[str, str]]:
          f"< {p.auto_codon_match_pct:g}% match" if p.auto_codon_match_pct is not None else "Off"),
         ("Grouping threshold", f"{p.pie_min_frac:.3f}"),
         ("minimap2 version", tools.get("minimap2") or "-"),
-        ("samtools version", tools.get("samtools") or "-"),
     ]
+
+
+def _table_html(title: str, caption: str, rows: list[tuple[str, ...]]) -> str:
+    """A titled section holding one table; the first cell of each row is its
+    heading, and a row of ``<b>`` cells reads as a header."""
+    body = "".join("<tr><th>" + html.escape(row[0]) + "</th>"
+                   + "".join(f"<td>{cell}</td>" for cell in row[1:]) + "</tr>"
+                   for row in rows)
+    return (f"<section><h2>{title}</h2><p class='caption'>{caption}</p>"
+            f"<table class='parameter-table'><tbody>{body}</tbody></table></section>")
 
 
 def _funnel_html(report: Report) -> str:
     """Stage-by-stage read accounting for the downloaded report."""
-    rows = "".join(
-        f"<tr><th>{html.escape(s.label)}</th><td>{s.count:,}</td>"
-        f"<td>{html.escape(s.detail)}</td>"
-        f"<td>{html.escape(', '.join(s.used_by) or '-')}</td></tr>"
-        for s in report.funnel)
-    return (
-        "<section><h2>Read filtering</h2>"
-        "<p class='caption'>How many reads survive each step, and which outputs "
-        "are built from each.</p>"
-        "<table class='parameter-table'><tbody>"
-        "<tr><th>Step</th><td><b>Reads</b></td><td><b>Rule</b></td>"
-        "<td><b>Used by</b></td></tr>" + rows + "</tbody></table></section>")
+    return _table_html(
+        "Read filtering",
+        "How many reads survive each step, and which outputs are built from each.",
+        [("Step", "<b>Reads</b>", "<b>Rule</b>", "<b>Used by</b>")]
+        + [(s.label, f"{s.count:,}", html.escape(s.detail),
+            html.escape(", ".join(s.used_by) or "-")) for s in report.funnel])
 
 
 def _parameters_html(report: Report) -> str:
     """HTML table summarising analysis parameters."""
-    rows = "".join(f"<tr><th>{html.escape(label)}</th>"
-                   f"<td>{html.escape(value)}</td></tr>"
-                   for label, value in _parameter_rows(report))
-    return (
-        "<section>"
-        "<h2>Analysis parameters</h2>"
-        "<p class='caption'>Settings and inputs used to generate this report.</p>"
-        "<table class='parameter-table'><tbody>" + rows + "</tbody></table></section>")
+    return _table_html(
+        "Analysis parameters", "Settings and inputs used to generate this report.",
+        [(label, html.escape(value)) for label, value in _parameter_rows(report)])
 
 
 def _sequence_block(label: str, sequence: str | None) -> str:
@@ -186,10 +171,10 @@ def _tables(report: Report) -> None:
                          ("AA counts", report.df_aa_counts),
                          ("AA freq", report.df_aa_freq.round(4))):
         with st.expander(label):
-            st.dataframe(table, use_container_width=True)
+            st.dataframe(table, width="stretch")
     with st.expander("Haplotypes"):
         if report.hap_df is not None and not report.hap_df.empty:
-            st.dataframe(report.hap_df[["combo_label", "count"]], use_container_width=True)
+            st.dataframe(report.hap_df[["combo_label", "count"]], width="stretch")
         else:
             st.info("No haplotypes (provide codon positions).")
 
@@ -200,7 +185,10 @@ def _fastq_download_name(report: Report) -> str:
     return os.path.basename(name).replace("/", "_").replace("\\", "_") or "report"
 
 
-_DIVIDER = "<div class='divider'></div>"
+_DIVIDER_CSS = ("height:10px;border-radius:10px;margin:38px 0 26px;background:"
+                "linear-gradient(90deg,rgba(0,0,0,0) 0%,{grid} 8%,{secondary} 50%,"
+                "{grid} 92%,rgba(0,0,0,0) 100%)").format(**theme.PALETTE)
+_DIVIDER = f"<div style='{_DIVIDER_CSS}'></div>"
 
 
 def _figure_png_data_uri(fig: go.Figure) -> str:
@@ -212,8 +200,8 @@ def _figure_png_data_uri(fig: go.Figure) -> str:
 def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
     """Standalone HTML rendering of the main results section with static plot images."""
     pal = theme.PALETTE
-    warning = "".join(f"<div class='warning'>{html.escape(note)}</div>"
-                      for note in _warnings(report))
+    note = _insert_note(report)
+    warning = f"<div class='warning'>{html.escape(note)}</div>" if note else ""
 
     # A divider above each heading, as in the app; a figure without one runs on
     # inside the section above it.
@@ -273,13 +261,6 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
       color: {pal['text']};
       padding: 10px 12px;
       margin: 12px 0 18px;
-    }}
-    .divider {{
-      height: 10px;
-      border-radius: 10px;
-      margin: 38px 0 26px;
-      background: linear-gradient(90deg, rgba(0,0,0,0) 0%, {pal['grid']} 8%,
-                  {pal['secondary']} 50%, {pal['grid']} 92%, rgba(0,0,0,0) 100%);
     }}
     h3 {{
       color: {pal['primary_dark']};
@@ -401,7 +382,7 @@ def _plot(fig: go.Figure) -> None:
     if note := meta.get("description"):
         st.caption(str(note))
     st.plotly_chart(go.Figure(fig).update_layout(title_text=""),
-                    use_container_width=True,
+                    width="stretch",
                     config={"toImageButtonOptions": {"format": "svg"}})
 
 
@@ -424,21 +405,13 @@ def _section(title: str) -> None:
 
 def _divider() -> None:
     """Band between sections, fading out at both ends."""
-    pal = theme.PALETTE
-    st.markdown(
-        f"<div style='height:10px;border-radius:10px;margin:38px 0 26px;"
-        f"background:linear-gradient(90deg,"
-        f"rgba(0,0,0,0) 0%,{pal['grid']} 8%,{pal['secondary']} 50%,{pal['grid']} 92%,"
-        "rgba(0,0,0,0) 100%)'></div>",
-        unsafe_allow_html=True)
+    st.markdown(_DIVIDER, unsafe_allow_html=True)
 
 
 def render(report: Report) -> None:
     """Top-level results renderer."""
     if note := _insert_note(report):
         st.toast(note, icon="\u26a0\ufe0f")
-    if note := _samtools_note(report):
-        st.warning(note)
     figs = _build_figures(report)
     for label, fig in figs:
         # The heading is the figure's own title; a figure without one runs on

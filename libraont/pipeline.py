@@ -53,16 +53,14 @@ class AnalysisParams:
     auto_codon_match_pct: Optional[float] = None
 
 
-# Read fates, best first. Every aligned read lands in exactly one, so the counts
-# sum to the aligned total. Reads dropped earlier (raw length, no alignment) are
-# reported as discards, keeping that denominator meaningful.
+# Read fates, best first. Every read that says something about the insert lands
+# in exactly one, so the counts sum to ``Projection.n_informative``.
 FATE_ORDER: tuple[str, ...] = (
     "Variant",
     "Ambiguous diversity",
     "Wild type",
     "Deletion",
     "Insertion",
-    "Does not contain insert region",
 )
 
 # Fates whose reads still feed the composition tables (partial reads contribute
@@ -148,6 +146,7 @@ class AlignmentResult:
     mean_phred: Optional[float]
     phred_counts: Counter
     projection: Projection
+    read_map: Optional[ReadMap] = None
 
 
 def _stepper(progress: Progress):
@@ -160,7 +159,8 @@ def _stepper(progress: Progress):
 
 def compute_alignment(params: AnalysisParams, tools: Optional[dict] = None,
                       progress: Progress = None) -> AlignmentResult:
-    """Expensive stage: target extraction and minimap2 alignment/projection.
+    """Expensive stage: target extraction, and the single minimap2 pass that
+    yields both the insert projection and the whole-plasmid read map.
     Pure given its inputs, so it is safe to memoise (see ``gui.runner``)."""
     step = _stepper(progress)
     tools = tools if tools is not None else alignment.tool_status()
@@ -174,34 +174,23 @@ def compute_alignment(params: AnalysisParams, tools: Optional[dict] = None,
     length_counts, mean_phred, phred_counts = fastq_stats(params.fastq_path)
 
     step(0.25, "Aligning reads (minimap2)…")
-    projection = alignment.project_reads(
+    projection, read_map = alignment.align_reads(
         target, params.fastq_path, minimap2_bin=tools["minimap2"],
         reference_seq=params.plasmid_seq, min_read_len=params.min_read_len,
         max_read_len=params.max_read_len, min_phred=params.min_phred,
         n_input=sum(length_counts.values()))
     if not projection.rows:
+        if projection.n_off_target:
+            raise RuntimeError(
+                f"No read carries the insert: {projection.n_off_target:,} of "
+                f"{projection.n_aligned:,} aligned reads cross a vector-insert "
+                "junction with the insert missing, so the library reads as empty "
+                "vector.")
         raise RuntimeError("No reads aligned to the reference insert. Check the gene "
                            "sequence and the read-length window.")
     return AlignmentResult(target=target, length_counts=length_counts,
                            mean_phred=mean_phred, phred_counts=phred_counts,
-                           projection=projection)
-
-
-def compute_read_map(params: AnalysisParams, target: str, tools: Optional[dict] = None,
-                     progress: Progress = None) -> Optional[ReadMap]:
-    """Optional whole-plasmid read map, ``None`` without a plasmid or without
-    minimap2 + samtools - the GUI surfaces the latter as a warning."""
-    if not params.plasmid_seq:
-        return None
-    tools = tools if tools is not None else alignment.tool_status()
-    if not (tools.get("minimap2") and tools.get("samtools")):
-        return None
-    _stepper(progress)(0.92, "Mapping reads to the plasmid (minimap2 + samtools)…")
-    return alignment.map_reads_to_reference(
-        params.plasmid_seq, params.fastq_path, inner_seq=target,
-        minimap2_bin=tools["minimap2"], samtools_bin=tools["samtools"],
-        min_read_len=params.min_read_len, max_read_len=params.max_read_len,
-        min_phred=params.min_phred)
+                           projection=projection, read_map=read_map)
 
 
 def _build_funnel(params: AnalysisParams, result: AlignmentResult,
@@ -245,16 +234,12 @@ def _build_funnel(params: AnalysisParams, result: AlignmentResult,
                            "how the insert was assembled",
                     failed="align elsewhere on the plasmid without crossing a "
                            "vector-insert junction, so say nothing about the insert"),
-        FunnelStage("Contains the insert", proj.n_mapped,
-                    f"{proj.n_off_target:,} aligned clear of the insert "
-                    "(empty vector)", (), "no insert (empty vector)",
-                    passed="carry the insert",
-                    failed="align clear of the insert - empty vector"),
         FunnelStage(
             "Correctly assembled", len(intact),
             f"no insertion ≥ {params.structural_insertion_bp} bp or deletion ≥ "
-            f"{params.structural_deletion_bp} bp. Of the {n_span:,} reads "
-            f"spanning the whole insert, {len(spanning_intact):,} "
+            f"{params.structural_deletion_bp} bp, the insert missing altogether "
+            f"counting as a deletion ({proj.n_off_target:,} reads). Of the "
+            f"{n_span:,} reads spanning the whole insert, {len(spanning_intact):,} "
             f"({spanning_rate}) are correctly assembled - only a spanning read "
             "can be judged",
             ("Library Diversity and Coverage",),
@@ -302,7 +287,8 @@ def _build_fates(params: AnalysisParams, result: AlignmentResult,
             return "Wild type"
         return "Ambiguous diversity"
 
-    counts["Does not contain insert region"] = proj.n_off_target   # empty vector
+    # Empty vector is a deletion at full size: the same dead plasmid.
+    counts["Deletion"] = proj.n_off_target
     for name, st in proj.structures.items():
         if not st.is_intact(params.structural_insertion_bp,
                             params.structural_deletion_bp):
@@ -316,7 +302,7 @@ def _build_fates(params: AnalysisParams, result: AlignmentResult,
 
 
 def tabulate_report(params: AnalysisParams, result: AlignmentResult,
-                    read_map: Optional[ReadMap], progress: Progress = None) -> Report:
+                    progress: Progress = None) -> Report:
     """Cheap stage: base/AA counts and haplotypes from the correctly assembled reads."""
     step = _stepper(progress)
     proj = result.projection
@@ -366,5 +352,5 @@ def tabulate_report(params: AnalysisParams, result: AlignmentResult,
         df_aa_freq=df_aa_freq, valid_positions=valid_positions,
         projection=proj, funnel=_build_funnel(params, result, intact, n_hap),
         fates=_build_fates(params, result, calls, ref_calls),
-        hap_df=hap_df,
+        hap_df=hap_df, read_map=result.read_map,
         codon_matrix=analysis.call_matrix(calls) if calls else None)

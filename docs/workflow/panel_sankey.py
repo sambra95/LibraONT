@@ -24,7 +24,6 @@ CHIP_W, CHIP_H, CHIP_TOP, CHIP_GAP = 148, 40, 64, 8
 ICON_H, ICON_GAP = 18, 4            # the wordless picture sitting on each chip
 ROW = ICON_H + ICON_GAP + CHIP_H
 TRUNK_TOP, TRUNK_H = 206, 165
-TRUNK_BOT = TRUNK_TOP + TRUNK_H
 STUB = 140          # the flow entering from the left, so pool one has a band too
 LOSS_Y, BRANCH_H = 404, 21          # every branch lands here, at one thickness
 GLYPH_Y, GLYPH_R = 458, 17          # the little plasmid under each branch

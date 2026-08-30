@@ -4,14 +4,13 @@ channels:
   - bioconda
 dependencies:
   - python=3.12
-  # External bioinformatics tools (same binaries installed on Streamlit Cloud
-  # via packages.txt). conda puts these on PATH so the app resolves them
-  # automatically - no path editing needed in the sidebar.
+  # External aligner (same binary installed on Streamlit Cloud via
+  # packages.txt). conda puts it on PATH so the app resolves it automatically -
+  # no path editing needed in the sidebar.
   - minimap2
-  - samtools
   - pip
   - pip:
-      - streamlit>=1.33
+      - streamlit>=1.49
       - plotly>=5.20,<6
       - pandas>=2.0
       - numpy>=1.24

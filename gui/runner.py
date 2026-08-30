@@ -1,7 +1,6 @@
 """Streamlit-cached composition of the analysis pipeline.
 
-Only the minimap2 alignment is memoised, keyed on the parameters affecting it,
-so tweaking a downstream input reuses it and nothing downstream goes stale. The
+Only the minimap2 pass is memoised, keyed on the parameters affecting it. The
 cached call must stay pure - ``st.cache_data`` replays element side-effects - so
 progress is driven around it.
 """
@@ -23,17 +22,10 @@ def _cached_alignment(key: tuple, _params: AnalysisParams) -> AlignmentResult:
 
 def run_analysis(params: AnalysisParams, progress=None) -> Report:
     """Run the pipeline."""
-    def step(frac: float, msg: str) -> None:
-        if progress:
-            progress(frac, msg)
-
-    step(0.10, "Aligning reads")
+    if progress:
+        progress(0.10, "Aligning reads")
     key = (params.fastq_path, params.gene_seq, params.plasmid_seq,
            params.min_read_len, params.max_read_len, params.min_phred)
     aln = _cached_alignment(key, params)
-
     # Uncached from here, so it always re-runs and may drive the progress bar.
-    step(0.65, "Mapping reads to the plasmid")
-    read_map = pipeline.compute_read_map(params, aln.target, progress=progress)
-
-    return pipeline.tabulate_report(params, aln, read_map, progress=progress)
+    return pipeline.tabulate_report(params, aln, progress=progress)

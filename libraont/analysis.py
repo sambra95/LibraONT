@@ -171,7 +171,7 @@ def read_codon_calls(msa: dict[str, str], ref_codons: list[tuple[int, int, int]]
 
 def call_matrix(calls: dict[str, tuple[str | None, ...]]) -> np.ndarray:
     """Reads called at every position, one column of amino acids per diversified
-    codon - what the sampling and covariation plots read."""
+    codon - what the variant panels read."""
     rows = [c for c in calls.values() if c and all(aa is not None for aa in c)]
     return np.array(rows) if rows else np.empty((0, 0), dtype="<U1")
 
