@@ -894,7 +894,8 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
     ))
     fig.update_layout(
         template=_T, height=500, title="",
-        meta={"subtitle": "Unique variants by abundance",
+        meta={"subtitle": f"{len(df):,} unique variants in "
+                          f"{int(df['count'].sum()):,} fully called reads",
               "description":
               "Every unique combination of amino acids across the variable "
               "codons, each tile sized by the reads carrying it, so a library "
