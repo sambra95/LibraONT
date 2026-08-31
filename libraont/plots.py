@@ -104,11 +104,19 @@ def _kept_pie(n_input: int, n_length_kept: int, n_quality_kept: int,
                       "%{customdata}<extra></extra>")
 
 
+def _mean(counts: Counter) -> float:
+    """Mean of a value -> count mapping."""
+    n = sum(counts.values())
+    return sum(v * c for v, c in counts.items()) / n if n else 0.0
+
+
 def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=(),
                         min_read_len: int | None = None,
                         max_read_len: int | None = None,
                         min_phred: int | None = None,
-                        plasmid_len: int | None = None) -> go.Figure:
+                        plasmid_len: int | None = None,
+                        insert_len: int | None = None,
+                        mean_phred: float | None = None) -> go.Figure:
     """The read set as it arrives: read length, mean read quality, and what the
     two cutoffs keep. Bars a cutoff excludes are red, as are the cutoff lines
     and the slice they account for. The funnel below carries on from here."""
@@ -164,7 +172,15 @@ def read_summary_figure(length_counts: Counter, phred_counts: Counter, funnel=()
         xaxis2=dict(domain=[0.0, 0.62], anchor="y2",
                     title_text="Mean Phred per read (Q)"),
         yaxis2=dict(domain=[0.0, 0.36], anchor="x2", title_text="Count"),
-        meta={"description": description})
+        meta={"description": description,
+              "metrics": [
+                  ("Total reads", f"{n_input:,}"),
+                  ("Plasmid size", f"{plasmid_len:,} bp" if plasmid_len else "-"),
+                  ("Insert size", f"{insert_len:,} bp" if insert_len else "-"),
+                  ("Mean Phred", f"Q{mean_phred:.1f}" if mean_phred is not None else "-"),
+                  ("Mean read length", f"{_mean(length_counts):,.0f} bp"
+                                       if length_counts else "-"),
+              ]})
     return fig
 
 
@@ -841,6 +857,16 @@ def _drop_rare_variants(hap_df: pd.DataFrame, aa_counts: pd.DataFrame | None,
     return hap_df[~hap_df["combo_tuple"].map(has_rare)]
 
 
+def _gini(counts) -> float:
+    """Gini coefficient of a count distribution: 0 even, 1 dominated by one variant."""
+    x = np.sort(np.asarray(counts, dtype=float))
+    total = x.sum()
+    if len(x) < 2 or total <= 0:
+        return 0.0
+    i = np.arange(1, len(x) + 1)
+    return float((2 * (i * x).sum()) / (len(x) * total) - (len(x) + 1) / len(x))
+
+
 def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
                              top_n: int | None = None, aa_counts: pd.DataFrame | None = None,
                              positions=None, min_frac: float = 0.0) -> go.Figure:
@@ -892,10 +918,18 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
                        "%{customdata[1]}<br>Reads %{value}"
                        "<br>%{percentRoot:.1%}<extra></extra>"),
     ))
+    reads = int(df["count"].sum())
+    by_distance = (df.dropna(subset=["aa_hamming_distance"])
+                     .groupby("aa_hamming_distance")["count"].sum())
     fig.update_layout(
         template=_T, height=500, title="",
-        meta={"subtitle": f"{len(df):,} unique variants in "
-                          f"{int(df['count'].sum()):,} fully called reads",
+        meta={"subtitle": "Variant combinations by abundance",
+              "metrics": [("Unique variants", f"{len(df):,}"),
+                          ("Fully called reads", f"{reads:,}"),
+                          ("Gini coefficient", f"{_gini(df['count']):.2f}"),
+                          ("Most common mutation count",
+                           f"{int(by_distance.idxmax())}" if not by_distance.empty
+                           else "-")],
               "description":
               "Every unique combination of amino acids across the variable "
               "codons, each tile sized by the reads carrying it, so a library "

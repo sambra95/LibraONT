@@ -25,7 +25,8 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
         ("Read Dataset and Filtering", plots.read_summary_figure(
             report.length_counts, report.phred_counts, report.funnel,
             p.min_read_len, p.max_read_len, p.min_phred,
-            plasmid_len=len(clean_sequence(p.plasmid_seq)) if p.plasmid_seq else None)),
+            plasmid_len=len(clean_sequence(p.plasmid_seq)) if p.plasmid_seq else None,
+            insert_len=len(report.target), mean_phred=report.mean_phred)),
         ("", plots.read_funnel_sankey_figure(
             report.funnel, report.fates,
             p.structural_insertion_bp, p.structural_deletion_bp)),
@@ -209,8 +210,13 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
         meta = _figure_meta(fig)
         subtitle = html.escape(str(meta.get("subtitle") or ""))
         description = html.escape(str(meta.get("description") or ""))
+        metrics = "".join(
+            f"<div class='metric'><span>{html.escape(str(label))}</span>"
+            f"<b>{html.escape(str(value))}</b></div>"
+            for label, value in meta.get("metrics") or [])
         return ((f"<h3>{subtitle}</h3>" if subtitle else "")
                 + (f"<p class='caption'>{description}</p>" if description else "")
+                + (f"<div class='metrics'>{metrics}</div>" if metrics else "")
                 + f"<div class='plot'><img src='{_figure_png_data_uri(fig)}' "
                   f"alt='{subtitle}'></div>")
 
@@ -307,6 +313,27 @@ def _html_report(report: Report, figs: list[tuple[str, object]]) -> str:
       letter-spacing: 0.04em;
       text-transform: uppercase;
     }}
+    .metrics {{
+      display: flex;
+      gap: 10px;
+      margin: 0 0 12px;
+    }}
+    .metric {{
+      flex: 1 1 0;
+      padding: 9px 12px;
+      background: {pal['surface']};
+      border: 1px solid {pal['grid']};
+      border-radius: 8px;
+    }}
+    .metric span {{
+      display: block;
+      color: {pal['muted']};
+      font-size: 0.78rem;
+    }}
+    .metric b {{
+      font-size: 1.4rem;
+      font-weight: 600;
+    }}
     .plot {{
       margin-top: 4px;
       flex: 3 1 0;
@@ -381,6 +408,9 @@ def _plot(fig: go.Figure) -> None:
         _subsection(str(subtitle))
     if note := meta.get("description"):
         st.caption(str(note))
+    if metrics := meta.get("metrics"):
+        for col, (label, value) in zip(st.columns(len(metrics)), metrics):
+            col.metric(label, value, border=True)
     st.plotly_chart(go.Figure(fig).update_layout(title_text=""),
                     width="stretch",
                     config={"toImageButtonOptions": {"format": "svg"}})
