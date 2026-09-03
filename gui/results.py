@@ -174,8 +174,13 @@ def _tables(report: Report) -> None:
         with st.expander(label):
             st.dataframe(table, width="stretch")
     with st.expander("Haplotypes"):
-        if report.hap_df is not None and not report.hap_df.empty:
-            st.dataframe(report.hap_df[["combo_label", "count"]], width="stretch")
+        hap = report.hap_df
+        if hap is not None and not hap.empty:
+            # ``mutations`` is X123Y notation; empty without a reference to call it from.
+            table = hap[["mutations", "count"]].copy()
+            table["mutations"] = table["mutations"].where(table["mutations"].ne(""),
+                                                          hap["combo_label"])
+            st.dataframe(table, width="stretch")
         else:
             st.info("No haplotypes (provide codon positions).")
 
