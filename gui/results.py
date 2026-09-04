@@ -42,7 +42,8 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
         report.df_counts, ref_seq=report.target[:len(report.df_counts)],
         shade_codons=report.valid_positions or None, frame_offset=0,
         auto_match_threshold=p.auto_codon_match_pct,
-        aa_counts=report.df_aa_counts)))
+        aa_counts=report.df_aa_counts, n_reads=report.n_intact,
+        user_positions=p.pie_positions)))
 
     if report.valid_positions:
         aa_fig = plots.aa_pies_figure(

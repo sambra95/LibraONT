@@ -641,14 +641,37 @@ def _base_track(ref_seq: str, length: int, yaxis: str | None = "y3", *,
                          list(bases), colors, width=1, size=9, yaxis=yaxis)
 
 
+def _gap_match_metrics(n_reads, threshold, user_positions, shade_codons):
+    """Cards for the match track: reads behind it, how its codons were picked,
+    and how many came out."""
+    named = list(user_positions or [])
+    if threshold is not None:
+        picked = (f"< {threshold:g}% match"
+                  + (f" + codons {_codon_list(named)}" if named else ""))
+    else:
+        picked = f"Codons {_codon_list(named)}" if named else "Off"
+    return [("Reads used", f"{n_reads:,}" if n_reads is not None else "-"),
+            ("Codon detection", picked),
+            ("Variant positions", f"{len(shade_codons or ()):,}")]
+
+
+def _codon_list(positions, limit: int = 6) -> str:
+    """User-named codons, trimmed once the list stops fitting on a card."""
+    shown = ", ".join(str(p) for p in positions[:limit])
+    return shown + (f" +{len(positions) - limit} more" if len(positions) > limit else "")
+
+
 def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "-",
                      shade_codons=None, frame_offset: int = 0,
                      auto_match_threshold: float | None = None,
-                     aa_counts: pd.DataFrame | None = None) -> go.Figure:
+                     aa_counts: pd.DataFrame | None = None,
+                     n_reads: int | None = None,
+                     user_positions=None) -> go.Figure:
     """Per-position reference-match % (gaps excluded from the denominator),
     optionally shading codons and marking the auto-detect cutoff. A band above
     gives each codon's reference amino acid; with ``aa_counts``, the hover also
-    lists AA frequencies at that codon."""
+    lists AA frequencies at that codon. ``n_reads`` and ``user_positions`` (the
+    codons the user named) only feed the metric cards."""
     if gap_char not in df_counts.columns:
         raise ValueError(f"Gap column '{gap_char}' not in df_counts: {list(df_counts.columns)}")
     if frame_offset not in (0, 1, 2):
@@ -728,6 +751,8 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
         hoverlabel=dict(font=dict(family="monospace", size=12)),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         meta={"subtitle": "Reference match along the insert",
+              "metrics": _gap_match_metrics(n_reads, auto_match_threshold,
+                                            user_positions, shade_codons),
               "description":
               "How often each insert base matches the reference, gaps excluded "
               "from the denominator: a position the library diversifies drops "
@@ -907,8 +932,14 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
         for distance in df_plot["aa_hamming_distance"]
     ]
 
+    # Tiles name the mutations, as the hover does; "Other" and uncalled
+    # references keep the positional label.
+    tiles = df_plot["mutations"].fillna("").astype(str)
+    tiles = tiles.where(tiles.ne("") & df_plot["combo_label"].ne("Other"),
+                        df_plot["combo_label"])
+
     fig = go.Figure(go.Treemap(
-        labels=df_plot["combo_label"], parents=[""] * len(df_plot),
+        ids=df_plot["combo_label"], labels=tiles, parents=[""] * len(df_plot),
         values=df_plot["count"], branchvalues="total",
         customdata=list(zip(status, distances,
                             df_plot["mutations"].fillna("").astype(str))),
