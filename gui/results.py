@@ -11,7 +11,7 @@ import zipfile
 import plotly.graph_objects as go
 import streamlit as st
 
-from libraont import plots, theme
+from libraont import analysis, plots, theme
 from libraont.alignment import tool_versions
 from libraont.pipeline import Report
 from libraont.sequences import clean_sequence
@@ -45,22 +45,26 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
         aa_counts=report.df_aa_counts, n_reads=report.n_intact,
         user_positions=p.pie_positions)))
 
-    if report.valid_positions:
-        aa_fig = plots.aa_pies_figure(
-            report.df_aa_counts, report.valid_positions, ref_seq=report.target,
-            min_frac=p.pie_min_frac)
-        if aa_fig is not None:
-            figs.append(("", aa_fig))
-        if report.hap_df is not None:
-            figs.append(("", plots.haplotype_treemap_figure(
-                report.hap_df, aa_counts=report.df_aa_counts,
-                positions=report.valid_positions, min_frac=p.pie_min_frac)))
-            panels = plots.variant_panels_figure(
-                report.hap_df, report.codon_matrix, report.valid_positions,
-                aa_counts=report.df_aa_counts, min_frac=p.pie_min_frac)
-            if panels is not None:
-                figs.append(("", panels))
+    figs += [("", fig) for fig in composition_figures(report)]
     return figs
+
+
+def composition_figures(report: Report) -> list[go.Figure]:
+    """What the variable codons hold: the amino-acid donuts, the variant treemap
+    and the variant panels. Empty when no codon is called variable."""
+    p = report.params
+    if not report.valid_positions:
+        return []
+    figs = [plots.aa_pies_figure(report.df_aa_counts, report.valid_positions,
+                                 ref_seq=report.target, min_frac=p.pie_min_frac)]
+    if report.hap_df is not None:
+        figs.append(plots.haplotype_treemap_figure(
+            report.hap_df, aa_counts=report.df_aa_counts,
+            positions=report.valid_positions, min_frac=p.pie_min_frac))
+        figs.append(plots.variant_panels_figure(
+            report.hap_df, report.codon_matrix, report.valid_positions,
+            aa_counts=report.df_aa_counts, min_frac=p.pie_min_frac))
+    return [fig for fig in figs if fig is not None]
 
 
 def _figure_meta(fig: go.Figure) -> dict:
@@ -177,10 +181,8 @@ def _tables(report: Report) -> None:
     with st.expander("Haplotypes"):
         hap = report.hap_df
         if hap is not None and not hap.empty:
-            # ``mutations`` is X123Y notation; empty without a reference to call it from.
             table = hap[["mutations", "count"]].copy()
-            table["mutations"] = table["mutations"].where(table["mutations"].ne(""),
-                                                          hap["combo_label"])
+            table["mutations"] = analysis.variant_labels(hap)
             st.dataframe(table, width="stretch")
         else:
             st.info("No haplotypes (provide codon positions).")
@@ -407,7 +409,7 @@ def _downloads(report: Report, figs: list[tuple[str, object]]) -> None:
                            type="primary", width="stretch")
 
 
-def _plot(fig: go.Figure) -> None:
+def plot(fig: go.Figure) -> None:
     """One plot with its own heading and note above it."""
     meta = _figure_meta(fig)
     if subtitle := meta.get("subtitle"):
@@ -424,24 +426,21 @@ def _plot(fig: go.Figure) -> None:
 
 def _subsection(title: str) -> None:
     """Heading for one plot inside a section."""
-    st.markdown(
-        f"<h3 style='color:{theme.PALETTE['primary_dark']};font-size:1.1rem;"
-        f"font-weight:600;margin:0.7rem 0 0.15rem;padding:0'>"
-        f"{html.escape(title)}</h3>", unsafe_allow_html=True)
+    st.html(f"<h3 style='color:{theme.PALETTE['primary_dark']};font-size:1.1rem;"
+            f"font-weight:600;margin:0.7rem 0 0.15rem;padding:0'>"
+            f"{html.escape(title)}</h3>")
 
 
 def _section(title: str) -> None:
     """Section heading, at ``st.title`` size - Streamlit styles the h1 for us,
     and its own title would use the body text colour."""
-    st.markdown(
-        f"<h1 style='color:{theme.PALETTE['primary_dark']};margin:0 0 0.5rem;"
-        f"padding:0'>{html.escape(title)}</h1>",
-        unsafe_allow_html=True)
+    st.html(f"<h1 style='color:{theme.PALETTE['primary_dark']};margin:0 0 0.5rem;"
+            f"padding:0'>{html.escape(title)}</h1>")
 
 
 def _divider() -> None:
     """Band between sections, fading out at both ends."""
-    st.markdown(_DIVIDER, unsafe_allow_html=True)
+    st.html(_DIVIDER)
 
 
 def render(report: Report) -> None:
@@ -455,7 +454,7 @@ def render(report: Report) -> None:
         if heading := fig.layout.title.text or label:
             _divider()
             _section(heading)
-        _plot(fig)
+        plot(fig)
 
     _divider()
     _tables(report)

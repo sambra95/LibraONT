@@ -208,3 +208,12 @@ def haplotype_counts(calls: dict[str, tuple[str | None, ...]],
          "aa_hamming_distance": (sum(a != b for a, b in zip(tup, ref_tuple))
                                  if ref_tuple is not None else None)}
         for tup, cnt in sorted(ctr.items(), key=lambda kv: kv[1], reverse=True)])
+
+
+def variant_labels(hap_df: pd.DataFrame) -> pd.Series:
+    """How a variant is named everywhere: its mutations in X123Y notation, or
+    the positional label when there is no reference to call them from."""
+    labels = hap_df["mutations"].fillna("").astype(str)
+    return labels.where(labels.ne(""), hap_df["combo_label"])
+
+

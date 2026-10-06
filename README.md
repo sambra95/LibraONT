@@ -16,7 +16,9 @@ automatically detected codons.
 
 ## Inputs
 
-- **FASTQ file** - nanopore reads (`.fastq`, `.fq`, or gzipped).
+- **FASTQ files** - nanopore reads (`.fastq`, `.fq`, or gzipped). One describes a
+  library on its own; several are treated as time points of one selection, each
+  given a time in the sidebar.
 - **Gene sequence** - the reference gene/insert (A/C/G/T/N, case-insensitive).
 - **Plasmid sequence** _(optional)_ - full plasmid; enables the read alignment map.
 - **Insert region** - the full gene, or a start/stop sub-region.
@@ -35,6 +37,8 @@ Displayed in the app:
 - Amino-acid distributions at the identified codons
 - Variant treemap across the identified codons
 - Base, amino-acid and haplotype data tables
+- Variant frequencies over time, with every time point drawn in the composition
+  plots (when several FASTQs are uploaded)
 
 Downloads:
 

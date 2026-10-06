@@ -16,7 +16,7 @@ from plotly.subplots import make_subplots
 
 from . import theme
 from .alignment import SUBSTITUTION_CODES, ReadMap
-from .analysis import reference_match_percent
+from .analysis import reference_match_percent, variant_labels
 from .constants import GENETIC_CODE
 
 _T = theme.TEMPLATE_NAME
@@ -764,6 +764,102 @@ def gap_match_figure(df_counts: pd.DataFrame, ref_seq: str, *, gap_char: str = "
     return fig
 
 
+def _spacing(n: int, want: float) -> float:
+    """Subplot spacing Plotly will accept: it caps at ``1 / (n - 1)``."""
+    return 0.0 if n < 2 else min(want, 0.8 / (n - 1))
+
+
+def _pie_cell(counts_row: pd.Series, min_frac: float,
+              ref_aa: str | None) -> tuple[go.Pie, str]:
+    """One codon's donut and the caption for its hole: slices below ``min_frac``
+    fold into 'Other'."""
+    total = float(counts_row.sum())
+    if total > 0:
+        fracs = counts_row / total
+        keep, small = fracs[fracs >= min_frac], fracs[fracs < min_frac]
+        labels, values = list(keep.index), list((keep * total).to_numpy())
+        if small.sum() > 0:
+            labels.append("Other")
+            values.append(float((small * total).sum()))
+    else:
+        labels, values = ["(no data)"], [1]
+    middle = ((f"<span style='color:{theme.AA_COLORS.get(ref_aa, theme.PALETTE['muted'])}'>"
+               f"<b>WT {ref_aa}</b></span><br>" if ref_aa else "") + f"n={int(total):,}")
+    return go.Pie(
+        labels=labels, values=values, hole=0.5, sort=False,
+        customdata=[_AA_NAMES.get(label, label) for label in labels],
+        marker=dict(colors=theme.aa_color_sequence(labels),
+                    line=dict(color="#000000", width=1)),
+        textinfo="label+percent", textposition="inside",
+        hovertemplate="%{customdata}<br>Count %{value:.0f}<br>"
+                      "%{percent:.2%}<extra></extra>",
+        showlegend=False), middle
+
+
+def _donut_grid(cells, cols: int, *, titles=None, row_titles=None) -> go.Figure:
+    """Lay donut cells - ``(trace, hole caption)`` - out row-major on a grid and
+    write each caption into its hole."""
+    rows = math.ceil(len(cells) / cols)
+    height = rows * 300
+    # Plotly expresses subplot spacing as a fraction of total figure height.
+    # Keep the actual row gap near-constant so large grids do not violate
+    # Plotly's max spacing limit or waste vertical space.
+    fig = make_subplots(
+        rows=rows, cols=cols,
+        specs=[[{"type": "domain"} for _ in range(cols)] for _ in range(rows)],
+        subplot_titles=titles,
+        horizontal_spacing=_spacing(cols, 0.035),
+        vertical_spacing=_spacing(rows, min(0.08, 28 / height)))
+
+    for i in range(rows * cols):
+        r, c = divmod(i, cols)
+        cell = cells[i] if i < len(cells) else None
+        if cell is None:
+            # Invisible pie keeps empty cells the same size as filled ones.
+            fig.add_trace(go.Pie(labels=[""], values=[1], hole=0.5, opacity=0,
+                                 showlegend=False, hoverinfo="skip"),
+                          row=r + 1, col=c + 1)
+        else:
+            fig.add_trace(cell[0], row=r + 1, col=c + 1)
+
+    drawn = (t for t in fig.data
+             if isinstance(t, go.Pie) and t.opacity != 0 and t.labels != ("",))
+    for trace, (_, middle) in zip(drawn, [c for c in cells if c is not None]):
+        xd, yd = trace.domain["x"], trace.domain["y"]
+        fig.add_annotation(x=(xd[0] + xd[1]) / 2, y=(yd[0] + yd[1]) / 2,
+                           xref="paper", yref="paper", showarrow=False,
+                           xanchor="center", yanchor="middle", align="center",
+                           text=middle,
+                           font=dict(size=12, color=theme.PALETTE["muted"]))
+    # Plotly's own row titles sit to the right of the grid; these read down its
+    # left edge, next to the first donut of each row.
+    for r, label in enumerate(row_titles or []):
+        yd = fig.data[r * cols].domain["y"]
+        fig.add_annotation(x=0, y=(yd[0] + yd[1]) / 2, xref="paper", yref="paper",
+                           xshift=-10, showarrow=False, xanchor="right",
+                           yanchor="middle", text=label,
+                           font=dict(size=12, color=theme.PALETTE["muted"]))
+
+    fig.update_layout(template=_T, title="", showlegend=False,
+                      height=height, width=cols * 300,
+                      uniformtext_minsize=10, uniformtext_mode="hide")
+    if row_titles:   # room for the labels outside the leftmost column
+        fig.update_layout(margin_l=max(60, 8 * max(map(len, row_titles)) + 20))
+    return fig
+
+
+def _wild_type_aas(ref_seq: str | None, positions) -> dict:
+    """Reference residue per codon position, where the reference reaches it."""
+    up = (ref_seq or "").upper()
+    return {p: GENETIC_CODE.get(up[(p - 1) * 3:(p - 1) * 3 + 3]) for p in positions}
+
+
+_PIE_NOTE = ("One donut per codon the analysis calls variable: each slice is an "
+             "amino acid's share of the reads there, with residues below the "
+             "grouping threshold folded into 'Other'. The middle names the "
+             "reference residue and the reads behind that codon.")
+
+
 def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *,
                    ref_seq: str | None = None,
                    min_frac: float = 0.01) -> go.Figure | None:
@@ -772,85 +868,36 @@ def aa_pies_figure(df_aa_counts: pd.DataFrame, positions, *,
     pos_ok = [p for p in positions if p in df_aa_counts.index]
     if not pos_ok:
         return None
-    n = len(pos_ok)
-    cols = min(4, n)
-    rows = math.ceil(n / cols)
-    height = rows * 300
-    # Plotly expresses subplot spacing as a fraction of total figure height.
-    # Keep the actual row gap near-constant so large auto-detected sets do not
-    # violate Plotly's max spacing limit or waste vertical space.
-    vertical_spacing = 0.0 if rows == 1 else min(0.08, 28 / height)
-    up = (ref_seq or "").upper()
-    wild_type = {p: GENETIC_CODE.get(up[(p - 1) * 3:(p - 1) * 3 + 3]) for p in pos_ok}
-    fig = make_subplots(
-        rows=rows, cols=cols,
-        specs=[[{"type": "domain"} for _ in range(cols)] for _ in range(rows)],
-        subplot_titles=[f"Codon {p}" for p in pos_ok],
-        horizontal_spacing=0.035, vertical_spacing=vertical_spacing,
-    )
+    wild_type = _wild_type_aas(ref_seq, pos_ok)
+    cells = [_pie_cell(df_aa_counts.loc[p].astype(float), min_frac, wild_type.get(p))
+             for p in pos_ok]
+    fig = _donut_grid(cells, min(4, len(pos_ok)),
+                      titles=[f"Codon {p}" for p in pos_ok])
+    fig.update_layout(meta={"subtitle": "Amino acids at each variable codon",
+                            "description": _PIE_NOTE})
+    return fig
 
-    k = 0
-    middles: list[str] = []
-    for r in range(1, rows + 1):
-        for c in range(1, cols + 1):
-            if k >= n:
-                # Invisible pie keeps empty cells the same size as filled ones.
-                fig.add_trace(go.Pie(labels=[""], values=[1], hole=0.5, opacity=0,
-                                     showlegend=False, hoverinfo="skip"), row=r, col=c)
-                continue
-            pos = pos_ok[k]; k += 1
-            counts = df_aa_counts.loc[pos].astype(float)
-            total = counts.sum()
-            if total > 0:
-                fracs = counts / total
-                keep = fracs[fracs >= min_frac]
-                small = fracs[fracs < min_frac]
-                labels = list(keep.index)
-                values = list((keep * total).to_numpy())
-                if small.sum() > 0:
-                    labels.append("Other")
-                    values.append(float((small * total).sum()))
-            else:
-                labels, values = ["(no data)"], [1]
-            aa = wild_type.get(pos)
-            middles.append(
-                (f"<span style='color:{theme.AA_COLORS.get(aa, theme.PALETTE['muted'])}'>"
-                 f"<b>WT {aa}</b></span><br>" if aa else "") + f"n={int(total):,}")
-            fig.add_trace(go.Pie(
-                labels=labels, values=values, hole=0.5, sort=False,
-                customdata=[_AA_NAMES.get(label, label) for label in labels],
-                marker=dict(
-                    colors=theme.aa_color_sequence(labels),
-                    line=dict(color="#000000", width=1),
-                ),
-                textinfo="label+percent", textposition="inside",
-                hovertemplate="%{customdata}<br>Count %{value:.0f}<br>"
-                              "%{percent:.2%}<extra></extra>",
-                showlegend=False,
-            ), row=r, col=c)
 
-    # Reference residue and read count in the middle of each real donut.
-    drawn = (t for t in fig.data
-             if isinstance(t, go.Pie) and t.opacity != 0 and t.labels != ("",))
-    for trace, middle in zip(drawn, middles):
-        xd, yd = trace.domain["x"], trace.domain["y"]
-        fig.add_annotation(x=(xd[0] + xd[1]) / 2, y=(yd[0] + yd[1]) / 2,
-                           xref="paper", yref="paper", showarrow=False,
-                           xanchor="center", yanchor="middle", align="center",
-                           text=middle, font=dict(size=12,
-                                                  color=theme.PALETTE["muted"]))
-
-    fig.update_layout(
-        template=_T, title="", showlegend=False,
-        height=height, width=cols * 300,
-        uniformtext_minsize=10, uniformtext_mode="hide",
-        meta={"subtitle": "Amino acids at each variable codon",
-              "description":
-              "One donut per codon the analysis calls variable: each slice is an "
-              "amino acid's share of the reads there, with residues below the "
-              "grouping threshold folded into 'Other'. The middle names the "
-              "reference residue and the reads behind that codon."},
-    )
+def aa_pies_time_figure(samples, positions, *, ref_seq: str | None = None,
+                        min_frac: float = 0.01) -> go.Figure | None:
+    """The donuts of :func:`aa_pies_figure` for several samples at once: one row
+    per sample - ``(label, df_aa_counts)`` - and one column per codon."""
+    pos_ok = [p for p in positions
+              if any(p in counts.index for _, counts in samples)]
+    if not pos_ok or not samples:
+        return None
+    wild_type = _wild_type_aas(ref_seq, pos_ok)
+    cells = [_pie_cell(counts.loc[p].astype(float) if p in counts.index
+                       else pd.Series(dtype=float), min_frac, wild_type.get(p))
+             for _, counts in samples for p in pos_ok]
+    titles = [f"Codon {p}" for p in pos_ok] + [""] * (len(pos_ok) * (len(samples) - 1))
+    fig = _donut_grid(cells, len(pos_ok), titles=titles,
+                      row_titles=[label for label, _ in samples])
+    fig.update_layout(meta={"subtitle": "Amino acids at each variable codon, "
+                                        "per time point",
+                            "description": _PIE_NOTE
+                            + " One row per time point, so a codon's drift down "
+                              "the selection reads down its column."})
     return fig
 
 
@@ -892,19 +939,9 @@ def _gini(counts) -> float:
     return float((2 * (i * x).sum()) / (len(x) * total) - (len(x) + 1) / len(x))
 
 
-def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
-                             top_n: int | None = None, aa_counts: pd.DataFrame | None = None,
-                             positions=None, min_frac: float = 0.0) -> go.Figure:
-    """Treemap of haplotypes sized by count; ``top_n`` folds the rest into
-    'Other'. Variants carrying an amino acid below ``min_frac`` at its codon are
-    excluded (0 keeps everything), as are reads not called at every codon."""
-    if hap_df.empty:
-        return _empty("No haplotypes to display")
-
-    hap_df = _drop_rare_variants(hap_df, aa_counts, positions, min_frac)
-    if hap_df.empty:
-        return _empty("No variants remain above the grouping threshold")
-
+def _treemap_trace(hap_df: pd.DataFrame, top_n: int | None) -> tuple[go.Treemap, pd.DataFrame]:
+    """Tiles for one sample's haplotypes - ``top_n`` folds the rest into 'Other' -
+    and the variant table behind them."""
     df = hap_df[["combo_label", "count"]].copy()
     df["mutations"] = hap_df.get("mutations", "")
     df["is_reference"] = hap_df.get("is_reference", False)
@@ -927,18 +964,13 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
     line_colors = ["#000000" if flag else "#FFFFFF" for flag in is_reference]
     line_widths = [4 if flag else 1 for flag in is_reference]
     status = ["Reference match" if flag else "Variant" for flag in is_reference]
-    distances = [
-        "n/a" if pd.isna(distance) else str(int(distance))
-        for distance in df_plot["aa_hamming_distance"]
-    ]
+    distances = ["n/a" if pd.isna(distance) else str(int(distance))
+                 for distance in df_plot["aa_hamming_distance"]]
 
-    # Tiles name the mutations, as the hover does; "Other" and uncalled
-    # references keep the positional label.
-    tiles = df_plot["mutations"].fillna("").astype(str)
-    tiles = tiles.where(tiles.ne("") & df_plot["combo_label"].ne("Other"),
-                        df_plot["combo_label"])
+    # Tiles name the mutations, as the hover does; "Other" keeps its own name.
+    tiles = variant_labels(df_plot).where(df_plot["combo_label"].ne("Other"), "Other")
 
-    fig = go.Figure(go.Treemap(
+    return go.Treemap(
         ids=df_plot["combo_label"], labels=tiles, parents=[""] * len(df_plot),
         values=df_plot["count"], branchvalues="total",
         customdata=list(zip(status, distances,
@@ -948,7 +980,30 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
         hovertemplate=("<b>%{customdata[2]}</b><br>Hamming distance to WT: "
                        "%{customdata[1]}<br>Reads %{value}"
                        "<br>%{percentRoot:.1%}<extra></extra>"),
-    ))
+    ), df
+
+
+_TREEMAP_NOTE = ("Every unique combination of amino acids across the variable "
+                 "codons, each tile sized by the reads carrying it, so a library "
+                 "dominated by a few clones shows a few large tiles. The reference "
+                 "combination is outlined in black.")
+
+
+def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
+                             top_n: int | None = None, aa_counts: pd.DataFrame | None = None,
+                             positions=None, min_frac: float = 0.0) -> go.Figure:
+    """Treemap of haplotypes sized by count; ``top_n`` folds the rest into
+    'Other'. Variants carrying an amino acid below ``min_frac`` at its codon are
+    excluded (0 keeps everything), as are reads not called at every codon."""
+    if hap_df.empty:
+        return _empty("No haplotypes to display")
+
+    hap_df = _drop_rare_variants(hap_df, aa_counts, positions, min_frac)
+    if hap_df.empty:
+        return _empty("No variants remain above the grouping threshold")
+
+    trace, df = _treemap_trace(hap_df, top_n)
+    fig = go.Figure(trace)
     reads = int(df["count"].sum())
     by_distance = (df.dropna(subset=["aa_hamming_distance"])
                      .groupby("aa_hamming_distance")["count"].sum())
@@ -961,11 +1016,144 @@ def haplotype_treemap_figure(hap_df: pd.DataFrame, *,
                           ("Most common mutation count",
                            f"{int(by_distance.idxmax())}" if not by_distance.empty
                            else "-")],
+              "description": _TREEMAP_NOTE})
+    return fig
+
+
+def haplotype_treemap_time_figure(samples, *, top_n: int | None = None,
+                                  min_frac: float = 0.0) -> go.Figure | None:
+    """One treemap per sample - ``(label, hap_df, aa_counts, positions)`` - side
+    by side, so the same library reads across the selection."""
+    cells = []
+    for label, hap_df, aa_counts, positions in samples:
+        kept = (_drop_rare_variants(hap_df, aa_counts, positions, min_frac)
+                if hap_df is not None and not hap_df.empty else None)
+        cells.append((label, None if kept is None or kept.empty
+                      else _treemap_trace(kept, top_n)[0]))
+    if not any(trace is not None for _, trace in cells):
+        return None
+
+    fig = make_subplots(rows=1, cols=len(cells),
+                        specs=[[{"type": "domain"} for _ in cells]],
+                        subplot_titles=[label for label, _ in cells],
+                        horizontal_spacing=_spacing(len(cells), 0.02))
+    for i, (_, trace) in enumerate(cells):
+        if trace is not None:
+            fig.add_trace(trace, row=1, col=i + 1)
+    fig.update_layout(
+        template=_T, height=440, title="", margin=dict(t=60, l=10, r=10, b=10),
+        meta={"subtitle": "Variant combinations by abundance, per time point",
+              "description": _TREEMAP_NOTE
+              + " One treemap per time point, so selection shows as tiles merging "
+                "into a few large blocks."})
+    return fig
+
+
+def read_depth_figure(reads: pd.Series, *, time_unit: str = "Time") -> go.Figure:
+    """Reads behind each time point of a selection: the fully-called reads the
+    variant frequencies are a share of."""
+    if reads.empty:
+        return _empty("No reads to display")
+    times = list(reads.index)
+    fig = go.Figure(go.Bar(
+        x=times, y=reads.to_list(), marker_color=theme.PALETTE["primary"],
+        text=[f"{n:,.0f}" for n in reads], textposition="outside",
+        hovertemplate="%{y:,.0f} reads<extra></extra>"))
+    fig.update_layout(
+        template=_T, height=340, title="",
+        xaxis=dict(title_text=time_unit, tickvals=times),
+        yaxis=dict(title_text="Reads used", rangemode="tozero"),
+        margin=dict(t=40),
+        meta={"subtitle": "Reads behind each time point",
+              "metrics": [("Reads used", f"{reads.sum():,.0f}"),
+                          ("Mean per time point", f"{reads.mean():,.0f}"),
+                          ("Shallowest", f"{reads.min():,.0f} at "
+                                         f"{reads.idxmin():g} {time_unit.lower()}")],
               "description":
-              "Every unique combination of amino acids across the variable "
-              "codons, each tile sized by the reads carrying it, so a library "
-              "dominated by a few clones shows a few large tiles. The reference "
-              "combination is outlined in black."})
+              "Reads called at every variable codon and kept by the grouping "
+              "threshold - the denominator of the frequencies below. A short bar "
+              "makes its time point's frequencies noisier than the rest."})
+    return fig
+
+
+# How ``analysis.variant_labels`` names the reference combination.
+WILD_TYPE = "wild type"
+
+
+def variant_trajectory_figure(freq: pd.DataFrame, *, top_n: int = 5,
+                              time_unit: str = "Time") -> go.Figure:
+    """Each variant's share of its sample over time. ``freq`` is variants (rows,
+    named as the treemap tiles are) by time point (columns, percentages). The
+    best final shares are coloured and named, one whole share at a time until
+    ``top_n`` variants are covered - a share held by that many on its own is
+    highlighted alone; the wild type is highlighted black and dashed, and the
+    rest run grey and unlabelled."""
+    if freq.empty:
+        return _empty("No variants to follow")
+
+    times = list(freq.columns)
+    ranked = freq.sort_values(by=[times[-1]] + times[::-1], ascending=False)
+    # The reference is drawn in its own right, as the black-outlined tile is on
+    # the treemap, so it never takes a highlight slot.
+    wild_type = ranked.loc[WILD_TYPE].to_list() if WILD_TYPE in ranked.index else None
+    ranked = ranked.drop(index=WILD_TYPE, errors="ignore")
+    # Whole scores at a time, best first: the next final share joins only while
+    # fewer than ``top_n`` variants have been covered, so a score already holding
+    # that many is highlighted alone.
+    last = ranked[times[-1]]
+    covered = last.value_counts().sort_index(ascending=False).cumsum()
+    enough = covered[covered >= top_n]
+    cutoff = (enough.index[0] if len(enough)
+              else covered.index[-1] if len(covered) else 0.0)
+    top, rest = ranked[last >= cutoff], ranked[last < cutoff]
+
+    fig = go.Figure()
+    for label, row in rest.iterrows():
+        fig.add_trace(go.Scatter(
+            x=times, y=row.to_list(), mode="lines", showlegend=False,
+            line=dict(color=theme.PALETTE["secondary"], width=1), opacity=0.45,
+            name=str(label), hovertemplate=f"{label}<br>%{{y:.2f}}%<extra></extra>"))
+    for i, (label, row) in enumerate(top.iterrows()):
+        fig.add_trace(go.Scatter(
+            x=times, y=row.to_list(), mode="lines+markers",
+            name=textwrap.shorten(str(label), 34, placeholder="…"),
+            line=dict(color=theme.CATEGORICAL[i % len(theme.CATEGORICAL)], width=2.5),
+            marker=dict(size=7),
+            hovertemplate=f"<b>{label}</b><br>%{{y:.2f}}%<extra></extra>"))
+    if wild_type is not None:
+        fig.add_trace(go.Scatter(
+            x=times, y=wild_type, mode="lines+markers", name="Wild type",
+            line=dict(color=theme.PALETTE["text"], width=3, dash="6px,3px"),
+            marker=dict(size=8, symbol="diamond"),
+            hovertemplate="<b>Wild type</b><br>%{y:.2f}%<extra></extra>"))
+
+    best = top.iloc[0][times[-1]] if len(top) else None
+    fig.update_layout(
+        template=_T, height=520, title="Variant Selection Over Time",
+        xaxis=dict(title_text=time_unit, tickvals=times),
+        yaxis=dict(title_text="Frequency of called reads (%)", rangemode="tozero"),
+        # Per-line hover: unified would list every variant at once.
+        hovermode="closest", margin=dict(t=80),
+        legend=dict(title_text=f"Top {len(top)}", orientation="v", x=1.01, y=1),
+        meta={"subtitle": "Variant frequency across the selection",
+              "metrics": [("Time points", f"{len(times)}"),
+                          ("Variants followed", f"{len(freq):,}"),
+                          ("Most enriched", textwrap.shorten(str(top.index[0]), 28,
+                                                             placeholder="…")
+                                            if len(top) else "-"),
+                          ("Its final share",
+                           f"{best:.1f}%" if best is not None else "-"),
+                          ("Wild type at the end",
+                           f"{wild_type[-1]:.1f}%" if wild_type else "-")],
+              "description":
+              "Every variant's share of the reads called at all variable codons, "
+              "one line per variant across the sampled time points. The "
+              "best shares at the last time point are coloured and named, taken "
+              f"one whole share at a time until {top_n} variants are covered "
+              f"({len(top)} here), and the wild type runs black and dashed; the "
+              "rest stay grey, so "
+              "selection shows as a line climbing out of the background and "
+              "overtaking the reference."})
     return fig
 
 
@@ -975,6 +1163,87 @@ _AA_BY_GROUP = [aa for group in _GROUP_ORDER
                 for aa in theme.AA_ORDER if theme.AA_GROUPS.get(aa) == group]
 
 
+_HAMMING_TITLE = "Frequency of Hamming Distance to WT"
+_RAREFACTION_TITLE = "Unique variants seen"
+_PANELS_NOTE = ("Unique variants by how many amino-acid changes they carry from "
+                "the reference, wild type in amber; the variants found as reads "
+                "are sampled, over eight shuffles, against the diagonal where "
+                "every read is new.")
+
+
+def _hamming_bar(df: pd.DataFrame) -> go.Bar | None:
+    """Unique variants per amino-acid distance from the reference."""
+    distances = (pd.to_numeric(df["aa_hamming_distance"], errors="coerce")
+                 if not df.empty else None)
+    if distances is None or not distances.notna().any():
+        return None
+    counts = df["count"].to_numpy(dtype=float)
+    per_step = (pd.DataFrame({"changes": distances, "count": counts}).dropna()
+                .groupby("changes").agg(variants=("count", "size"),
+                                        reads=("count", "sum")))
+    return go.Bar(
+        x=per_step.index.astype(int), y=per_step["variants"], showlegend=False,
+        # The section's own teal, with wild type in the funnel's amber.
+        marker_color=[FATE_COLORS["Wild type"] if d == 0 else theme.PALETTE["primary"]
+                      for d in per_step.index],
+        customdata=100.0 * per_step["reads"].to_numpy() / counts.sum(),
+        hovertemplate="%{x} change(s) from the reference<br>%{y:,} variants, "
+                      "%{customdata:.1f}% of reads<extra></extra>")
+
+
+def _rarefaction_traces(codon_matrix: np.ndarray | None, replicates: int,
+                        points: int) -> tuple[list[go.Scatter], int] | None:
+    """The variants-seen curve with its spread and the every-read-new diagonal."""
+    if codon_matrix is None or codon_matrix.shape[0] < 2:
+        return None
+    n = codon_matrix.shape[0]
+    ids = np.unique(codon_matrix, axis=0, return_inverse=True)[1]
+    xs = np.unique(np.linspace(1, n, points).astype(int))
+    # A variant is new at the first read carrying it, so the curve is a lookup
+    # into the sorted first-occurrence positions of one shuffle.
+    rng = np.random.default_rng(0)
+    curves = np.array([
+        np.searchsorted(
+            np.sort(np.unique(ids[rng.permutation(n)], return_index=True)[1]),
+            xs, side="left")
+        for _ in range(replicates)], dtype=float)
+    mean = curves.mean(axis=0)
+    # Upper edge first, then the lower one filling back to it.
+    traces = [go.Scatter(x=xs, y=edge, mode="lines", line=dict(width=0),
+                         hoverinfo="skip", showlegend=False, fill=fill,
+                         fillcolor=_rgba(theme.PALETTE["primary"], 0.14))
+              for edge, fill in ((curves.max(axis=0), None),
+                                 (curves.min(axis=0), "tonexty"))]
+    traces.append(go.Scatter(
+        x=[0, n], y=[0, n], mode="lines", showlegend=False,
+        line=dict(color=theme.PALETTE["muted"], width=1, dash="3px,3px"),
+        hovertemplate="Every read a new variant<extra></extra>"))
+    traces.append(go.Scatter(
+        x=xs, y=mean, mode="lines", showlegend=False,
+        line=dict(color=theme.PALETTE["primary"], width=1.8),
+        customdata=100.0 * mean / max(mean[-1], 1.0),
+        hovertemplate="%{x:,} reads<br>%{y:,.0f} variants "
+                      "(%{customdata:.1f}% of all seen)<extra></extra>"))
+    return traces, n
+
+
+def _place_panels(fig: go.Figure, row: int, at: dict, bar, curves) -> None:
+    """Draw one sample's panels into ``row`` of a prepared grid."""
+    if bar is not None and _HAMMING_TITLE in at:
+        col = at[_HAMMING_TITLE]
+        fig.add_trace(bar, row=row, col=col)
+        fig.update_xaxes(title_text="Amino-acid changes", dtick=1, row=row, col=col)
+        fig.update_yaxes(title_text="Number of Unique Variants", row=row, col=col)
+    if curves is not None and _RAREFACTION_TITLE in at:
+        col, (traces, n) = at[_RAREFACTION_TITLE], curves
+        for trace in traces:
+            fig.add_trace(trace, row=row, col=col)
+        # Both axes run 0..n, so the diagonal spans the panel corner to corner
+        # however wide it is drawn.
+        fig.update_xaxes(title_text="Reads sampled", range=[0, n], row=row, col=col)
+        fig.update_yaxes(title_text="Unique variants", range=[0, n], row=row, col=col)
+
+
 def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
                           positions, *, aa_counts: pd.DataFrame | None = None,
                           min_frac: float = 0.0, replicates: int = 8,
@@ -982,81 +1251,55 @@ def variant_panels_figure(hap_df: pd.DataFrame, codon_matrix: np.ndarray | None,
     """The library's variants two ways, in one row: how far each sits from the
     reference, and whether the sequencing has seen them all. A panel is left out
     when its data cannot say anything."""
-    df = _drop_rare_variants(hap_df, aa_counts, positions, min_frac)
-    distances = pd.to_numeric(df["aa_hamming_distance"], errors="coerce") \
-        if not df.empty else None
-    graded = distances is not None and distances.notna().any()
-    sampled = codon_matrix is not None and codon_matrix.shape[0] >= 2
-    titles = [t for t, ok in (("Frequency of Hamming Distance to WT", graded),
-                              ("Unique variants seen", sampled)) if ok]
+    bar = _hamming_bar(_drop_rare_variants(hap_df, aa_counts, positions, min_frac))
+    curves = _rarefaction_traces(codon_matrix, replicates, points)
+    titles = [t for t, ok in ((_HAMMING_TITLE, bar is not None),
+                              (_RAREFACTION_TITLE, curves is not None)) if ok]
     if not titles:
         return None
     at = {title: i + 1 for i, title in enumerate(titles)}
     fig = make_subplots(rows=1, cols=len(titles), subplot_titles=titles,
                         horizontal_spacing=0.07)
-
-    if graded:
-        col = at["Frequency of Hamming Distance to WT"]
-        counts = df["count"].to_numpy(dtype=float)
-        per_step = (pd.DataFrame({"changes": distances, "count": counts}).dropna()
-                    .groupby("changes").agg(variants=("count", "size"),
-                                            reads=("count", "sum")))
-        fig.add_trace(go.Bar(
-            x=per_step.index.astype(int), y=per_step["variants"], showlegend=False,
-            # The section's own teal, with wild type in the funnel's amber.
-            marker_color=[FATE_COLORS["Wild type"] if d == 0
-                          else theme.PALETTE["primary"] for d in per_step.index],
-            customdata=100.0 * per_step["reads"].to_numpy() / counts.sum(),
-            hovertemplate="%{x} change(s) from the reference<br>%{y:,} variants, "
-                          "%{customdata:.1f}% of reads<extra></extra>"), row=1, col=col)
-        fig.update_xaxes(title_text="Amino-acid changes", dtick=1, row=1, col=col)
-        fig.update_yaxes(title_text="Number of Unique Variants", row=1, col=col)
-
-    if sampled:
-        col = at["Unique variants seen"]
-        n = codon_matrix.shape[0]
-        ids = np.unique(codon_matrix, axis=0, return_inverse=True)[1]
-        xs = np.unique(np.linspace(1, n, points).astype(int))
-        # A variant is new at the first read carrying it, so the curve is a
-        # lookup into the sorted first-occurrence positions of one shuffle.
-        rng = np.random.default_rng(0)
-        curves = np.array([
-            np.searchsorted(
-                np.sort(np.unique(ids[rng.permutation(n)], return_index=True)[1]),
-                xs, side="left")
-            for _ in range(replicates)], dtype=float)
-        mean = curves.mean(axis=0)
-        # Upper edge first, then the lower one filling back to it.
-        for edge, fill in ((curves.max(axis=0), None), (curves.min(axis=0), "tonexty")):
-            fig.add_trace(go.Scatter(
-                x=xs, y=edge, mode="lines", line=dict(width=0), hoverinfo="skip",
-                showlegend=False, fill=fill,
-                fillcolor=_rgba(theme.PALETTE["primary"], 0.14)), row=1, col=col)
-        fig.add_trace(go.Scatter(
-            x=[0, n], y=[0, n], mode="lines", showlegend=False,
-            line=dict(color=theme.PALETTE["muted"], width=1, dash="3px,3px"),
-            hovertemplate="Every read a new variant<extra></extra>"), row=1, col=col)
-        fig.add_trace(go.Scatter(
-            x=xs, y=mean, mode="lines", showlegend=False,
-            line=dict(color=theme.PALETTE["primary"], width=1.8),
-            customdata=100.0 * mean / max(mean[-1], 1.0),
-            hovertemplate="%{x:,} reads<br>%{y:,.0f} variants "
-                          "(%{customdata:.1f}% of all seen)<extra></extra>"),
-            row=1, col=col)
-        # Both axes run 0..n, so the diagonal spans the panel corner to corner
-        # however wide it is drawn.
-        fig.update_xaxes(title_text="Reads sampled", range=[0, n], row=1, col=col)
-        fig.update_yaxes(title_text="Unique variants", range=[0, n], row=1, col=col)
-
+    _place_panels(fig, 1, at, bar, curves)
     fig.update_layout(
         template=_T, title="", height=400, bargap=0.25,
         margin=dict(l=58, r=24, t=62, b=48),
         meta={"subtitle": "Variant spread and sampling",
-              "description":
-              "Unique variants by how many amino-acid changes they carry from the "
-              "reference, wild type in amber; the variants found as reads are "
-              "sampled, over eight shuffles, against the diagonal where every "
-              "read is new."})
+              "description": _PANELS_NOTE})
+    return fig
+
+
+def variant_panels_time_figure(samples, positions, *, min_frac: float = 0.0,
+                               replicates: int = 8, points: int = 120
+                               ) -> go.Figure | None:
+    """The panels of :func:`variant_panels_figure` for several samples at once:
+    one row per sample - ``(label, hap_df, codon_matrix, aa_counts)``."""
+    drawn = [(label,
+              _hamming_bar(_drop_rare_variants(hap_df, aa_counts, positions, min_frac))
+              if hap_df is not None and not hap_df.empty else None,
+              _rarefaction_traces(codon_matrix, replicates, points))
+             for label, hap_df, codon_matrix, aa_counts in samples]
+    titles = [t for t, ok in
+              ((_HAMMING_TITLE, any(bar is not None for _, bar, _ in drawn)),
+               (_RAREFACTION_TITLE, any(c is not None for _, _, c in drawn))) if ok]
+    if not titles or not drawn:
+        return None
+    at = {title: i + 1 for i, title in enumerate(titles)}
+    fig = make_subplots(
+        rows=len(drawn), cols=len(titles),
+        subplot_titles=titles + [""] * (len(titles) * (len(drawn) - 1)),
+        row_titles=[label for label, _, _ in drawn],
+        horizontal_spacing=_spacing(len(titles), 0.07),
+        vertical_spacing=_spacing(len(drawn), min(0.12, 90 / (len(drawn) * 340))))
+    for row, (_, bar, curves) in enumerate(drawn, start=1):
+        _place_panels(fig, row, at, bar, curves)
+    fig.update_layout(
+        template=_T, title="", height=340 * len(drawn), bargap=0.25,
+        margin=dict(l=58, r=60, t=62, b=48),
+        meta={"subtitle": "Variant spread and sampling, per time point",
+              "description": _PANELS_NOTE
+              + " One row per time point, so a library collapsing onto a few "
+                "winners shows as the bars pulling together down the rows."})
     return fig
 
 
