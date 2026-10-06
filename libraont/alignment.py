@@ -1,8 +1,7 @@
 """Read alignment onto reference coordinates, and the whole-plasmid read map.
 
-Wraps ``edlib`` (locating the insert) and ``minimap2`` (aligning reads).
-``minimap2`` is looked up on ``PATH`` only, so a missing tool degrades rather
-than crashes.
+Wraps ``minimap2`` (aligning reads), looked up on ``PATH`` only, so a missing
+tool degrades rather than crashes.
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 
-import edlib
 import numpy as np
 
 from .sequences import (collapse_whitespace, filter_fastq, revcomp,
@@ -76,26 +74,24 @@ _REF_CONSUMING = frozenset("MDN=X")     # CIGAR ops consuming reference span
 
 
 # --- Locating the insert inside a larger reference ---------------------------
-def locate_insert(reference: str, insert: str) -> dict | None:
+def locate_insert(reference: str, insert: str) -> dict:
     """1-based inclusive span of ``insert`` within ``reference`` (either strand).
-    Approximate, not a substring search: the supplied gene routinely differs
-    from the plasmid's copy by a few bases."""
+    Exact: reads are judged against the gene as supplied, so it must occur
+    verbatim, and once. Raises ``ValueError`` otherwise."""
     ref = collapse_whitespace(reference).upper()
     query = collapse_whitespace(insert).upper()
-    if not ref or not query:
-        return None
     hits = []
     for strand, q in (("+", query), ("-", revcomp(query))):
-        res = edlib.align(q, ref, mode="HW", task="locations")
-        if res["locations"]:
-            hits.append((res["editDistance"], strand, res["locations"][0]))
+        at = ref.find(q)
+        while at != -1:
+            hits.append((at, strand))
+            at = ref.find(q, at + 1)
     if not hits:
-        return None
-    distance, strand, (start, end) = min(hits)
-    if distance > 0.25 * len(query):     # too poor to be this insert at all
-        return None
-    return {"start": start + 1, "end": end + 1, "strand": strand,
-            "mismatches": distance}
+        raise ValueError("Gene not found exactly in the plasmid.")
+    if len(hits) > 1:
+        raise ValueError(f"Gene occurs {len(hits)} times in the plasmid.")
+    start, strand = hits[0]
+    return {"start": start + 1, "end": start + len(query), "strand": strand}
 
 
 # --- Reference-anchored projection of read alignments ------------------------
@@ -266,12 +262,8 @@ def align_reads(insert: str, fastq_path: str, minimap2_bin: str,
     this exists to measure."""
     insert = collapse_whitespace(insert).upper()
     plasmid = collapse_whitespace(reference_seq).upper() if reference_seq else ""
-    # edlib, not an exact search: the supplied gene is routinely a few bases
-    # different from the plasmid's copy of it.
-    region = locate_insert(plasmid, insert) if plasmid else None
-    if region is None:                  # no plasmid, or the insert is not in it
-        plasmid = ""
-        region = {"start": 1, "end": len(insert), "strand": "+", "mismatches": 0}
+    region = (locate_insert(plasmid, insert) if plasmid
+              else {"start": 1, "end": len(insert), "strand": "+"})
     ref_seq = plasmid or insert
     fold = len(ref_seq)
     laps = 2 if plasmid else 1          # only a plasmid is circular

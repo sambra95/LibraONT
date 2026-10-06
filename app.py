@@ -31,7 +31,7 @@ if run_clicked:
                 params, progress=lambda f, m: progress.progress(f, text=m))
         except Exception as exc:
             st.session_state.pop("report", None)
-            st.error(f"Analysis failed: {exc}")
+            st.toast(f"Analysis failed: {exc}", duration="long")
         finally:
             progress.empty()
 

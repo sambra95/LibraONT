@@ -7,7 +7,7 @@ automatically detected codons.
 
 ## What it does
 
-1. Orient and trim each read to the reference insert (`edlib`) and filter by identity and length.
+1. Orient and trim each read to the reference insert and filter by identity and length.
 2. Align reads with minimap2 and project them onto reference coordinates,
    keeping the insertions each read carries.
 3. Tabulate per-position base and amino-acid composition.
