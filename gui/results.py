@@ -35,7 +35,7 @@ def _build_figures(report: Report) -> list[tuple[str, object]]:
         figs.append(("Read Alignment to the Plasmid",
                      plots.plasmid_map_figure(report.read_map, p.auto_codon_match_pct)))
         figs.append(("",
-                     plots.read_alignment_figure(report.read_map, report.target,
+                     plots.read_alignment_figure(report.read_map,
                                                  p.structural_insertion_bp,
                                                  p.structural_deletion_bp)))
     figs.append(("Library Diversity and Coverage", plots.gap_match_figure(

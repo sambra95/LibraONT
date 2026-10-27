@@ -219,17 +219,18 @@ def _panel_title(x: float, text: str, y: float = 1.05) -> dict:
 
 
 def _insert_marker(fig: go.Figure, start: float, end: float) -> None:
-    """Red bar labelled "insert" in the margin above the plot."""
-    fig.add_shape(type="rect", xref="x", yref="paper",
-                  x0=start, x1=end, y0=1.02, y1=1.05,
-                  fillcolor=_RED, line_width=0, layer="above")
-    fig.add_annotation(xref="x", yref="paper", x=(start + end) / 2, y=1.06,
+    """Bar labelled "insert" in the margin above the plot, sized in pixels."""
+    colour = theme.PALETTE["primary"]
+    fig.add_shape(type="rect", xref="x", yref="paper", ysizemode="pixel", yanchor=1,
+                  x0=start, x1=end, y0=6, y1=14,
+                  fillcolor=colour, line_width=0, layer="above")
+    fig.add_annotation(xref="x", yref="paper", x=(start + end) / 2, y=1, yshift=16,
                        text="insert", showarrow=False, yanchor="bottom",
-                       font=dict(size=11, color=_RED))
+                       font=dict(size=11, color=colour))
 
 
 # Per-base agreement, as flat bands: match, substitution, deletion, insertion.
-_MATCH_GREY = "#B4BAC1"
+_MATCH_GREY = "#D9DDE2"
 _SUBSTITUTION_AMBER = "#E0B252"
 _DELETION_RED = _RED
 _INSERTION_BLUE = "#3A6FB0"
@@ -247,9 +248,10 @@ for _base, _code in SUBSTITUTION_CODES.items():
 _BASE_LETTER = np.full(256, "?", dtype="<U1")
 for _base in "ACGTN":
     _BASE_LETTER[ord(_base)] = _base
-# A base is one pixel over a whole plasmid, so every departure also gets a
-# square marker; otherwise the map reads as uniform grey.
-_EVENT_MARKER = dict(size=3, symbol="square", line=dict(width=0))
+# Departure marks are this many pixels wide, as a base is under one pixel.
+_EVENT_WIDTH = 6
+# Row height and map height bounds, in pixels.
+_ROW_PX, _MAP_MAX_PX, _MAP_MIN_PX = 3, 900, 300
 # A deletion under this width gets a marker per base, so it cannot vanish
 # between pixels; a wider one is a visible block already and carries this many
 # markers, purely to keep its size reachable on hover.
@@ -265,94 +267,103 @@ def match_percent(cov: ReadMap) -> np.ndarray:
         return np.where(depth > 0, 100.0 * cov.match_counts / depth, np.nan)
 
 
-def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
-                          insertion_bp: int = 0, deletion_bp: int = 0) -> go.Figure:
-    """One row per read, coloured base by base against the reference: grey
-    match, amber substitution, red deletion, blue on the base an insertion
-    begins before, blank where the read does not reach. Each departure also gets
-    a square marker so it survives being one pixel wide, and indels below their
-    direction's threshold are dropped as basecall noise. Rows sort by start
-    position, so the pileup reads as a staircase and a shared change lines up as
-    a vertical stripe; above it runs the match trace and the insert's bands."""
-    ends, matrix = cov.read_ends, cov.match_matrix
+def read_alignment_figure(cov: ReadMap, insertion_bp: int = 0,
+                          deletion_bp: int = 0) -> go.Figure:
+    """Read alignment map with per-base agreement traces above."""
+    matrix = cov.match_matrix
     # mapped_reads counts every read; the arrays may hold an even sample of them.
     if max(int(cov.mapped_reads), int(cov.read_starts.shape[0])) == 0 or matrix.size == 0:
         return _empty("No reads aligned to the plasmid")
 
-    order = np.lexsort((ends, cov.read_starts))
-    ends, matrix = ends[order], matrix[order]
+    n_rows = matrix.shape[0]
+    order = np.lexsort((cov.read_ends, cov.read_starts))
+    # An even sample, so each row stays _ROW_PX tall under the map's cap.
+    order = order[np.unique(np.linspace(
+        0, n_rows - 1, min(n_rows, _MAP_MAX_PX // _ROW_PX)).astype(int))]
+    matrix = matrix[order]
     n_shown = matrix.shape[0]
-    rank = np.empty_like(order)          # old row index -> new, for the sparse records
+    # Old row -> drawn row, -1 if not drawn; records past the arrays hit the last -1.
+    rank = np.full(n_rows + 1, -1)
     rank[order] = np.arange(order.size)
+    drawn = lambda rows: rank[np.minimum(rows, n_rows)] >= 0
 
     z = matrix.astype(float)
     z[z == 0] = np.nan                   # uncovered renders as background
     # Insertions own no reference base, so the cell they begin before is painted
     # here, after thresholding; sub-threshold deletions are blanked rather than
     # recoloured, the read having no base there to show.
-    ins_keep = ((cov.insertion_rows < order.size)
+    ins_keep = (drawn(cov.insertion_rows)
                 & (cov.insertion_lengths >= max(insertion_bp, 1)))
     if ins_keep.any():
         z[rank[cov.insertion_rows[ins_keep]],
           cov.insertion_positions[ins_keep] - 1] = 4
-    del_keep = ((cov.deletion_rows < order.size)
+    del_keep = (drawn(cov.deletion_rows)
                 & (cov.deletion_lengths >= max(deletion_bp, 1)))
     width = matrix.shape[1]
     for read, at, length in zip(cov.deletion_rows[~del_keep],
                                 cov.deletion_positions[~del_keep],
                                 cov.deletion_lengths[~del_keep]):
-        if read < order.size:                # a deletion may run past the origin
+        if drawn(read):                      # a deletion may run past the origin
             z[rank[read], (np.arange(at - 1, at - 1 + length) % width)] = np.nan
 
-    x_max = cov.contig_length or int(ends.max())
-    _T_MARGIN, _B_MARGIN = 60, 48
-    height = int(min(880, max(340, n_shown + _T_MARGIN + _B_MARGIN + 230)))
-    positions = np.arange(1, matrix.shape[1] + 1)
-
+    x_max = cov.contig_length or int(cov.read_ends.max())
+    positions = np.arange(1, width + 1)
     depth = cov.depth_counts.astype(float)
-    pct = match_percent(cov)
 
-    # The insert's amino acids over its own span, then the whole reference's
-    # bases, both on the plasmid coordinate.
-    tracks: list[tuple[str, go.Bar]] = []
-    if insert_seq and cov.region:
-        reverse = cov.region.get("strand") == "-"
-        aa = _aa_track(insert_seq, len(insert_seq), 0, yaxis=None, number_labels=True,
-                       origin=cov.region["end"] if reverse else cov.region["start"],
-                       step=-1 if reverse else 1)
-        if aa is not None:
-            tracks.append(("AA", aa))
-    bases = _base_track(cov.contig_seq, len(cov.contig_seq), yaxis=None)
-    if bases is not None:
-        tracks.append(("bp", bases))
-
-    rows = len(tracks) + 2
-    heights = {2: [0.045, 0.04, 0.10, 0.815], 1: [0.05, 0.10, 0.85]}.get(
-        len(tracks), [0.10, 0.90])
-    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, row_heights=heights,
-                        vertical_spacing=0.025)
-    trace_row, map_row = len(tracks) + 1, len(tracks) + 2
-    for i, (_, track) in enumerate(tracks, start=1):
-        fig.add_trace(track, row=i, col=1)
-    fig.add_trace(go.Scatter(
-        x=positions, y=pct, mode="lines", name="Match",
-        line=dict(color=theme.PALETTE["primary"], width=1.4),
-        fill="tozeroy", fillcolor="rgba(31, 111, 139, 0.12)",
-        customdata=depth,
-        hovertemplate="Position %{x}<br>%{y:.1f}% of %{customdata:.0f} reads match"
-                      "<extra></extra>"), row=trace_row, col=1)
+    # Pixel row heights, so each map row is exactly _ROW_PX tall.
+    heights = [45] * 4 + [max(_MAP_MIN_PX, _ROW_PX * n_shown)]
+    margin, gap = dict(l=8, r=8, t=72, b=48), 12
+    plot_px = sum(heights) + gap * 4
+    fig = make_subplots(rows=5, cols=1, shared_xaxes=True, row_heights=heights,
+                        vertical_spacing=gap / plot_px)
+    # Insertions own no reference base, so are counted over the sampled rows.
+    shown = (cov.match_matrix != 0).sum(axis=0)
+    ins = cov.insertion_rows < n_rows
+    ins_at = np.bincount((cov.insertion_positions[ins] - 1) % width, minlength=width)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        lines = [
+            # Darker than the map's grey, which would vanish on the panel.
+            ("Reference Match", match_percent(cov), theme.PALETTE["muted"], depth,
+             "match"),
+            ("Substitution", 100.0 * (cov.covered_counts - cov.match_counts) / depth,
+             _SUBSTITUTION_AMBER, depth, "carry a substitution"),
+            ("Deletion", 100.0 * (depth - cov.covered_counts) / depth,
+             _DELETION_RED, depth, "carry a deletion"),
+            ("Insertion", 100.0 * ins_at / shown, _INSERTION_BLUE, shown,
+             "carry an insertion before it"),
+        ]
+    for row, (name, y, colour, n, verb) in enumerate(lines, start=1):
+        fig.add_trace(go.Scatter(
+            x=positions, y=y, mode="lines", line=dict(color=colour, width=1.4),
+            customdata=n,
+            hovertemplate=f"Position %{{x}}<br>%{{y:.1f}}% of %{{customdata:.0f}} "
+                          f"reads {verb}<extra></extra>"), row=row, col=1)
+        fig.add_annotation(xref="x domain", yref="y domain", x=0.005, y=1,
+                           xanchor="left", yanchor="top", showarrow=False,
+                           text=f"<b>{name} (%)</b>", font=dict(size=10.5, color=colour),
+                           bgcolor=_rgba(theme.PALETTE["surface"], 0.7), row=row, col=1)
+        fig.add_shape(type="rect", xref="x domain", yref="y domain", x0=0, x1=1,
+                      y0=0, y1=1, fillcolor=theme.PALETTE["surface"], line_width=0,
+                      layer="below", row=row, col=1)
+        if cov.region:
+            fig.add_vrect(x0=cov.region["start"], x1=cov.region["end"], line_width=0,
+                          fillcolor=_rgba(theme.PALETTE["primary"], 0.10),
+                          layer="below", row=row, col=1)
+        fig.update_yaxes(range=[0, 101], tickvals=[0, 100], ticks="",
+                         showticklabels=False, row=row, col=1)
     fig.add_trace(go.Heatmap(
         z=z, x=positions, showscale=False, zmin=0.5, zmax=8.5,
-        colorscale=_AGREEMENT_SCALE,
-        hovertemplate="Position %{x}<br>read row %{y}<extra></extra>"),
-        row=map_row, col=1)
+        colorscale=_AGREEMENT_SCALE, hoverinfo="skip"), row=5, col=1)
 
-    # A marker per event, so no departure is lost to being one pixel wide.
+    # Error bars, being sized in data units, stay one row tall at any zoom; the
+    # invisible marker beneath carries the hover.
     def events(x, y, colour: str, customdata, hover: str) -> None:
         fig.add_trace(go.Scatter(
-            x=x, y=y, mode="markers", showlegend=False, customdata=customdata,
-            marker=dict(color=colour, **_EVENT_MARKER), hovertemplate=hover),
-            row=map_row, col=1)
+            x=x, y=y, mode="markers", customdata=customdata,
+            marker=dict(size=_EVENT_WIDTH, opacity=0),
+            error_y=dict(type="constant", value=0.5, width=0, color=colour,
+                         thickness=_EVENT_WIDTH),
+            hoverlabel=dict(bgcolor=colour), hovertemplate=hover), row=5, col=1)
 
     # Substitutions come from the rendered z, not the raw matrix: an insertion
     # repaints the cell it begins before, which must not also claim one.
@@ -388,32 +399,29 @@ def read_alignment_figure(cov: ReadMap, insert_seq: str | None = None,
                _INSERTION_BLUE, cov.insertion_lengths[ins_keep],
                "Insertion of %{customdata:,} bp<br>before position %{x}<extra></extra>")
 
-    if cov.region and not tracks:
+    if cov.region:
         _insert_marker(fig, cov.region["start"], cov.region["end"])
+        # Over the map, not under it: its cells are opaque.
+        fig.add_vrect(x0=cov.region["start"], x1=cov.region["end"],
+                      fillcolor=_rgba(theme.PALETTE["primary"], 0.08), line_width=0,
+                      layer="above", row=5, col=1)
 
     fig.update_layout(
-        template=_T, title="", height=height, showlegend=False,
-        bargap=0, uniformtext=dict(minsize=5, mode="hide"),
-        margin=dict(l=60, r=48, t=_T_MARGIN + 12, b=_B_MARGIN),
-        meta={"subtitle": "Every read, base by base",
+        template=_T, title="", showlegend=False, margin=margin,
+        height=int(plot_px) + margin["t"] + margin["b"],
+        meta={"subtitle": "Read Alignment Map",
               "description":
-              "One row per read - an even sample of them where the pileup is deep "
-              "- coloured against the reference: grey matches, amber a "
-              "substitution, red a deletion, blue the base an insertion begins "
-              "before, and blank where the read does not reach. Rows sort by start "
-              "position, so a change many reads share lines up as a vertical "
-              "stripe. Above the map run the match trace and the reference's "
-              "amino acids and bases."})
-    for i, (title, _) in enumerate(tracks, start=1):
-        fig.update_yaxes(range=[0, 1], showgrid=False, zeroline=False,
-                         showticklabels=False, title_text=title, row=i, col=1)
-        fig.update_xaxes(range=[0, x_max], row=i, col=1)
-    fig.update_yaxes(title_text="Match (%)", range=[0, 101], row=trace_row, col=1)
+              "Map showing the alignment of fastq reads to the reference. Rows are "
+              "sorted by start position, so a change many reads share lines up as a "
+              "vertical stripe. Above the map are traces showing the percentage of "
+              "reads matching, substituted, deleted or inserted at each position."})
     fig.update_yaxes(showgrid=False, zeroline=False, showticklabels=False, title="",
-                     autorange="reversed", row=map_row, col=1)
-    fig.update_xaxes(range=[0, x_max], row=trace_row, col=1)
-    fig.update_xaxes(title_text="Plasmid position (bp)", range=[0, x_max],
-                     zeroline=False, showline=True, ticks="outside", row=map_row, col=1)
+                     range=[n_shown - 0.5, -0.5], row=5, col=1)
+    # Streamlit's theme turns automargin on, pushing the figure off centre.
+    fig.update_yaxes(automargin=False)
+    fig.update_xaxes(range=[0, x_max])
+    fig.update_xaxes(title_text="Plasmid position (bp)", zeroline=False, showline=True,
+                     ticks="outside", row=5, col=1)
     return fig
 
 
