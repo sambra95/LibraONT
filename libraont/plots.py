@@ -230,7 +230,7 @@ def _insert_marker(fig: go.Figure, start: float, end: float) -> None:
 
 
 # Per-base agreement, as flat bands: match, substitution, deletion, insertion.
-_MATCH_GREY = "#D9DDE2"
+_MATCH_GREY = "#E8EBEE"
 _SUBSTITUTION_AMBER = "#E0B252"
 _DELETION_RED = _RED
 _INSERTION_BLUE = "#3A6FB0"
