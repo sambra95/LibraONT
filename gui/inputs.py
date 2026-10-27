@@ -116,9 +116,7 @@ def _sidebar() -> None:
         "Deletion threshold (bp)", min_value=1, max_value=500,
         value=DEFAULT_STRUCTURAL_DELETION_BP, step=1,
         help="As above, for deletions - a library can fail one way only.")
-    st.caption("ONT indel errors run 1-9 bp and real rearrangements are far "
-               "larger, so anything in ~10-25 bp behaves alike. Reads under "
-               "both count as correctly assembled.")
+    st.caption("Reads under both count as correctly assembled.")
 
     st.subheader("Library Analysis settings")
     st.caption("Which codons count as variable, and how results are displayed. "

@@ -23,7 +23,6 @@ BASE_CATEGORIES: tuple[str, ...] = ('A', 'C', 'G', 'T', 'N', 'other', '-')
 # Amino acids rarer than this fold into 'Other'. Set low: in a diverse library
 # the individual variant residues *are* rare.
 DEFAULT_PIE_MIN_FRAC: float = 0.02
-# Smallest indel treated as an assembly defect, per direction. ONT indel errors
-# are 1-9 bp and real rearrangements much larger, so ~10-25 bp behaves alike.
+# Smallest indel treated as an assembly defect, per direction.
 DEFAULT_STRUCTURAL_INSERTION_BP: int = 5
 DEFAULT_STRUCTURAL_DELETION_BP: int = 5

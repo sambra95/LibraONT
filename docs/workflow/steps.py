@@ -35,4 +35,4 @@ PLOT_ICONS = {
     "Variant treemap": "treemap",
 }
 
-THRESHOLDS = {"insertion_bp": 10, "deletion_bp": 10, "span_pct": 95}
+THRESHOLDS = {"insertion_bp": 5, "deletion_bp": 5, "span_pct": 95}
