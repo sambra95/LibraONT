@@ -25,5 +25,5 @@ BASE_CATEGORIES: tuple[str, ...] = ('A', 'C', 'G', 'T', 'N', 'other', '-')
 DEFAULT_PIE_MIN_FRAC: float = 0.02
 # Smallest indel treated as an assembly defect, per direction. ONT indel errors
 # are 1-9 bp and real rearrangements much larger, so ~10-25 bp behaves alike.
-DEFAULT_STRUCTURAL_INSERTION_BP: int = 10
-DEFAULT_STRUCTURAL_DELETION_BP: int = 10
+DEFAULT_STRUCTURAL_INSERTION_BP: int = 5
+DEFAULT_STRUCTURAL_DELETION_BP: int = 5
