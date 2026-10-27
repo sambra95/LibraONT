@@ -363,7 +363,8 @@ def read_alignment_figure(cov: ReadMap, insertion_bp: int = 0,
             marker=dict(size=_EVENT_WIDTH, opacity=0),
             error_y=dict(type="constant", value=0.5, width=0, color=colour,
                          thickness=_EVENT_WIDTH),
-            hoverlabel=dict(bgcolor=colour), hovertemplate=hover), row=5, col=1)
+            hoverlabel=dict(bgcolor=colour, font_color="white"), hovertemplate=hover),
+            row=5, col=1)
 
     # Substitutions come from the rendered z, not the raw matrix: an insertion
     # repaints the cell it begins before, which must not also claim one.
